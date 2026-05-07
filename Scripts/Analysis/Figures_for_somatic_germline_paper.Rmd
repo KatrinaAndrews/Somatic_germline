@@ -11,9 +11,8 @@ date: "2026-02-05"
 # Aim
 Generate all manuscript figures in order of appearance, followed by supplementary figures.
 
-Note: `Scripts/ACMG_and_LRs/Auto_ACMG_RASopathy_results_analysis.Rmd` and
-`Scripts/Analysis/Other_visualisations/Gene_upset_plot_DD_cancer_somatic_selection.Rmd`
-must be knitted first to export the data files read below.
+Note: `Scripts/ACMG_and_LRs/Auto_ACMG_RASopathy_results_analysis.Rmd`
+must be knitted first to export the data file read below.
 
 ```{r, warning=FALSE, message=FALSE}
 library(tidyverse)
@@ -163,14 +162,41 @@ acmg_combined <- read_csv("../../Data/auto_ACMG_output/ACMG_all_classes_before_a
                                    "Auto ACMG outcome after somatic weighting"))
   )
 
-upset_gene_lists <- read_csv("../../Data/Gene_definitions/Upset_gene_lists_dominant.csv",
+DD_dominant_genes <- read_csv("../../Data/DDG2P/G2P_DD_2025-04-16.csv",
                               show_col_types = FALSE) %>%
-  { list(
-      `Dominant DD`      = filter(., list_name == "Dominant DD")     $gene,
-      `Cancer`           = filter(., list_name == "Cancer")          $gene,
-      `Sperm selection`  = filter(., list_name == "Sperm selection") $gene,
-      `Buccal selection` = filter(., list_name == "Buccal selection")$gene
-  )}
+  clean_names() %>%
+  filter(allelic_requirement %in% c("monoallelic_autosomal",
+                                    "monoallelic_X_heterozygous")) %>%
+  pull(gene_symbol) %>% unique()
+
+COSMIC_cancer_genes <- read_tsv("../../Data/Gene_definitions/Cosmic_CancerGeneCensus_v98_GRCh37.tsv.gz",
+                                 show_col_types = FALSE) %>%
+  pull(GENE_SYMBOL) %>% unique()
+
+sperm_selection_genes <- c(
+  "PTPN11", "MIB1", "RIT1", "FGFR3", "EP300", "FGFR2", "KDM5B", "NF1",
+  "SMAD6", "CUL3", "RASA2", "PRRC2A", "PTEN", "ROBO1", "DDX3X", "CSNK2B",
+  "KRAS", "PPM1D", "ARID1A", "BRAF", "HRAS", "KMT2E", "SCAF4", "BMPR2",
+  "TCF12", "CCAR2", "DHX9", "NSD1", "LZTR1", "ARHGAP35", "CBL", "SSX1",
+  "RBM12", "SMAD4", "FAM222B", "KDM5C", "KMT2D", "AR", "CTNNB1", "RAF1"
+)
+
+buccal_selection_genes <- c(
+  "NOTCH1", "FAT1", "TP53", "NOTCH2", "ATM", "MGA", "KMT2C", "ASXL1",
+  "CHEK2", "TET2", "PPM1D", "BCORL1", "ARID1A", "SETD2", "ZFP36L2", "ARID2",
+  "EP300", "NOTCH3", "KDM5C", "RAC1", "ARID1B", "RBM10", "KDM6A", "STAG2",
+  "EPHA2", "CIC", "SF3B1", "ZFP36L1", "EGFR", "DNMT3A", "PIK3R1", "TP63",
+  "ARID5B", "AJUBA", "FGFR3", "ZNF750", "FUBP1", "CUL3", "KLF5", "PAX9",
+  "FOXP1", "ETV6", "RHOA", "RARG", "SPOP", "SMARCB1", "CCND1", "HLA-B",
+  "EIF1AX", "PIK3CA"
+)
+
+upset_gene_lists <- list(
+  `Dominant DD`      = DD_dominant_genes,
+  `Cancer`           = COSMIC_cancer_genes,
+  `Sperm selection`  = sperm_selection_genes,
+  `Buccal selection` = buccal_selection_genes
+)
 ```
 
 ---
