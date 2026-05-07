@@ -1,0 +1,298 @@
+---
+title: "Per-gene single-feature AUC, AUPRC, F1, MCC (hold-out gene models)"
+output: html_document
+date: "2026-04-30"
+---
+
+# Aim
+
+For each individual gene (across all gene groups) and dataset, calculate classification metrics
+for individual features (somatic evidence scores and computational effect predictors):
+
+- AUC + 95% CI
+- AUPRC
+- Sensitivity, specificity, precision, recall, accuracy, balanced accuracy, F1, MCC at MCC-optimal threshold
+
+Only genes with ≥ 10 benign and ≥ 10 pathogenic variants are included. For each gene, features
+with > 20% missingness in pathogenic variants, or fewer than 10 non-NA variants in either class,
+are excluded.
+
+Output: `Data/AUC_tables/Gene_group_hold_out_models/Single_feature_AUCs_individual_genes_<date>.csv`
+
+```{r setup, message=FALSE}
+library(tidyverse)
+library(pROC)
+library(PRROC)
+library(parallel)
+
+date    <- "240426"
+n_cores <- max(1L, detectCores() - 1L)
+message("Using ", n_cores, " cores")
+
+dir.create("../../../Data/AUC_tables/Gene_group_hold_out_models",
+           recursive = TRUE, showWarnings = FALSE)
+
+buccal_panel_genes <- read_csv(
+  "../../../Data/Buccal_data/Lawson_supplementary_table1_buccal_nanoseq_panel.csv",
+  show_col_types = FALSE) %>% pull(gene) %>% unique()
+buccal_predictors <- c("n_buccal", "n_buccal_codon_count")
+```
+
+# Import data
+
+```{r load-data, message=FALSE}
+input_folder <- "../../../Data/ML_model_input/Gene_group_models/"
+
+clinvar_mutation_data_unique <- read_csv(
+  file.path(input_folder, paste0("Clinvar_vs_Biobank_unique_set1_", date, ".csv.gz")),
+  show_col_types = FALSE)
+clinvar_mutation_data_long   <- read_csv(
+  file.path(input_folder, paste0("Clinvar_vs_Biobank_long_set1_",   date, ".csv.gz")),
+  show_col_types = FALSE)
+DNM_mutation_data_unique     <- read_csv(
+  file.path(input_folder, paste0("DNM_vs_Biobank_unique_set1_",     date, ".csv.gz")),
+  show_col_types = FALSE)
+DNM_mutation_data_long       <- read_csv(
+  file.path(input_folder, paste0("DNM_vs_Biobank_long_set1_",       date, ".csv.gz")),
+  show_col_types = FALSE)
+
+data_sets <- c("clinvar_mutation_data_unique", "clinvar_mutation_data_long",
+               "DNM_mutation_data_unique",     "DNM_mutation_data_long")
+```
+
+# Metrics functions
+
+Copied verbatim from `Gene_group_single_feature_AUC_AUPRC_F1_MCC.Rmd` so per-gene metrics are
+computed identically to the gene-group version.
+
+```{r metrics-functions}
+inverted_predictors <- c("ESM1b", "ESM1v", "popEVE", "SIFT")
+
+midpoint_thresholds <- function(x, max_candidates = 500L) {
+  vals <- sort(unique(x[!is.na(x)]))
+  if (length(vals) <= 1L) return(vals)
+  mids <- (vals[-1L] + vals[-length(vals)]) / 2
+  candidates <- c(vals[1L] - 1e-12, mids, vals[length(vals)] + 1e-12)
+  if (length(candidates) > max_candidates)
+    candidates <- unname(quantile(candidates, probs = seq(0, 1, length.out = max_candidates)))
+  candidates
+}
+
+safe_div <- function(num, den) ifelse(den > 0, num / den, NA_real_)
+
+add_metrics_single_feature <- function(dat, predictor_col_name,
+                                       inverted_list = inverted_predictors) {
+  dat <- dat %>%
+    mutate(Pathogenicity_category = case_when(
+      Pathogenicity_category == "Pathogenic" ~ 1,
+      Pathogenicity_category == "Benign"     ~ 0,
+      TRUE                                   ~ NA_real_
+    ))
+
+  dat2 <- dat %>%
+    filter(!is.na(Pathogenicity_category) & !is.na(.data[[predictor_col_name]]))
+
+  na_row <- list(
+    Predictor = predictor_col_name,
+    AUC_full = NA_real_, AUC_full_lower = NA_real_, AUC_full_upper = NA_real_,
+    AUPRC = NA_real_, Threshold = NA_real_,
+    Sensitivity = NA_real_, Specificity = NA_real_,
+    Precision = NA_real_, Recall = NA_real_, Accuracy = NA_real_,
+    BalancedAccuracy = NA_real_, F1 = NA_real_, MCC = NA_real_,
+    Observed_direction = NA_character_,
+    Expected_direction = if (predictor_col_name %in% inverted_list)
+      "lower=pathogenic (higher=benign)" else "higher=pathogenic",
+    Consistent_with_expected = NA
+  )
+
+  if (nrow(dat2) == 0 || length(unique(dat2$Pathogenicity_category)) < 2) return(na_row)
+
+  score <- as.numeric(dat2[[predictor_col_name]])
+  y     <- as.integer(dat2$Pathogenicity_category)
+
+  r <- pROC::roc(response = y, predictor = score, levels = c(0, 1),
+                 direction = "auto", quiet = TRUE, na.rm = TRUE)
+
+  auc_val <- round(as.numeric(pROC::auc(r)), 4)
+  auc_ci  <- pROC::ci.auc(r)
+  dir_sym <- r$direction
+  obs_dir <- if (identical(dir_sym, "<")) "higher=pathogenic (controls < cases)"
+             else                         "higher=benign (controls > cases)"
+  exp_dir <- if (predictor_col_name %in% inverted_list)
+               "lower=pathogenic (higher=benign)" else "higher=pathogenic"
+  consistent <- (grepl("benign", obs_dir)     && grepl("benign", exp_dir)) ||
+                (grepl("pathogenic", obs_dir) && grepl("pathogenic", exp_dir))
+
+  inverted  <- predictor_col_name %in% inverted_list
+  pr_score  <- if (inverted) -score else score
+  pos_s     <- pr_score[y == 1]
+  neg_s     <- pr_score[y == 0]
+  auprc_val <- if (length(pos_s) > 0 && length(neg_s) > 0)
+    round(as.numeric(PRROC::pr.curve(pos_s, neg_s, curve = FALSE)$auc.integral), 4)
+  else NA_real_
+
+  candidates <- midpoint_thresholds(score)
+  best_mcc <- -Inf; best_thr <- NA_real_; best_sens <- NA_real_; best_spec <- NA_real_
+
+  for (thr_cand in candidates) {
+    pred_pos <- if (!inverted) as.integer(score >= thr_cand) else as.integer(score <= thr_cand)
+    TP <- as.numeric(sum(pred_pos == 1 & y == 1, na.rm = TRUE))
+    TN <- as.numeric(sum(pred_pos == 0 & y == 0, na.rm = TRUE))
+    FP <- as.numeric(sum(pred_pos == 1 & y == 0, na.rm = TRUE))
+    FN <- as.numeric(sum(pred_pos == 0 & y == 1, na.rm = TRUE))
+    s  <- safe_div(TP, TP + FN); p <- safe_div(TN, TN + FP)
+    dn <- sqrt((TP + FP) * (TP + FN) * (TN + FP) * (TN + FN))
+    m  <- if (!is.na(dn) && dn > 0) ((TP * TN) - (FP * FN)) / dn else NA_real_
+    if (!is.na(m) &&
+        (m > best_mcc ||
+         (isTRUE(all.equal(m, best_mcc)) && !is.na(s) && (is.na(best_sens) || s > best_sens)) ||
+         (isTRUE(all.equal(m, best_mcc)) && isTRUE(all.equal(s, best_sens)) &&
+          !is.na(p) && (is.na(best_spec) || p > best_spec)))) {
+      best_mcc <- m; best_thr <- thr_cand; best_sens <- s; best_spec <- p
+    }
+  }
+
+  pred_pos <- if (!is.na(best_thr)) {
+    if (!inverted) as.integer(score >= best_thr) else as.integer(score <= best_thr)
+  } else rep(NA_integer_, length(score))
+
+  TP <- as.numeric(sum(pred_pos == 1 & y == 1, na.rm = TRUE))
+  TN <- as.numeric(sum(pred_pos == 0 & y == 0, na.rm = TRUE))
+  FP <- as.numeric(sum(pred_pos == 1 & y == 0, na.rm = TRUE))
+  FN <- as.numeric(sum(pred_pos == 0 & y == 1, na.rm = TRUE))
+  N  <- TP + TN + FP + FN
+
+  prec <- safe_div(TP, TP + FP); rec <- safe_div(TP, TP + FN)
+  acc  <- if (N > 0) (TP + TN) / N else NA_real_
+  bal  <- mean(c(best_sens, best_spec), na.rm = TRUE)
+  f1   <- if (!is.na(prec) && !is.na(rec) && (prec + rec) > 0) 2 * prec * rec / (prec + rec) else NA_real_
+  dn2  <- sqrt((TP + FP) * (TP + FN) * (TN + FP) * (TN + FN))
+  mcc  <- if (!is.na(dn2) && dn2 > 0) ((TP * TN) - (FP * FN)) / dn2 else NA_real_
+
+  list(
+    Predictor = predictor_col_name,
+    AUC_full = auc_val, AUC_full_lower = round(auc_ci[1], 4), AUC_full_upper = round(auc_ci[3], 4),
+    AUPRC = auprc_val,
+    Threshold        = if (!is.na(best_thr))  round(best_thr, 6) else NA_real_,
+    Sensitivity      = if (!is.na(best_sens)) round(best_sens, 4) else NA_real_,
+    Specificity      = if (!is.na(best_spec)) round(best_spec, 4) else NA_real_,
+    Precision        = if (!is.na(prec))      round(prec, 4) else NA_real_,
+    Recall           = if (!is.na(rec))       round(rec, 4) else NA_real_,
+    Accuracy         = if (!is.na(acc))       round(acc, 4) else NA_real_,
+    BalancedAccuracy = if (!is.na(bal))       round(bal, 4) else NA_real_,
+    F1               = if (!is.na(f1))        round(f1, 4) else NA_real_,
+    MCC              = if (!is.na(mcc))       round(mcc, 4) else NA_real_,
+    Observed_direction       = obs_dir,
+    Expected_direction       = exp_dir,
+    Consistent_with_expected = consistent
+  )
+}
+
+make_metrics_df <- function(my_data, cols, inverted_list = inverted_predictors) {
+  bind_rows(lapply(cols, \(col)
+    as_tibble(add_metrics_single_feature(my_data, col, inverted_list))
+  ))
+}
+```
+
+# Feature list
+
+```{r feature-list}
+AUC_cols_all <- c(
+  "n_COSMIC", "n_COSMIC_genome", "n_COSMIC_targeted",
+  "n_COSMIC_codon_count", "n_COSMIC_genome_codon_count", "n_COSMIC_targeted_codon_count",
+  "hotcodon_cancer",
+  "n_sperm", "n_sperm_exomes", "n_sperm_codon_count", "n_sperm_exomes_codon_count",
+  "n_buccal", "n_buccal_codon_count",
+  "AlphaMissense", "REVEL", "ESM1b",
+  "SIFT", "Polyphen2_HVAR", "MutationAssessor", "MetaSVM", "M-CAP",
+  "PrimateAI", "VARITY_R", "CADD_raw", "popEVE", "ESM1v"
+)
+```
+
+# Compute metrics per gene
+
+```{r compute-metrics, message=FALSE}
+# Build (dataset_object_name, dataset_label, gene) combo table
+combos <- do.call(rbind, lapply(data_sets, function(df_name) {
+  df       <- get(df_name)
+  nm_parts <- str_split(df_name, "_")[[1]]
+  dataset_label <- paste0(nm_parts[1], "_", nm_parts[4])  # e.g. "clinvar_unique"
+
+  genes <- df %>%
+    group_by(gene) %>%
+    count(Pathogenicity_category) %>%
+    pivot_wider(values_from = n, names_from = Pathogenicity_category) %>%
+    filter(coalesce(Benign, 0L) > 9L, coalesce(Pathogenic, 0L) > 9L) %>%
+    pull(gene)
+
+  if (length(genes) == 0L) return(NULL)
+  data.frame(df_name = df_name, dataset = dataset_label, gene = genes,
+             stringsAsFactors = FALSE)
+}))
+
+message(nrow(combos), " (dataset, gene) combinations to process")
+
+compute_gene_metrics <- function(idx) {
+  row     <- combos[idx, ]
+  df      <- get(row$df_name, envir = .GlobalEnv)
+  gene_df <- filter(df, gene == row$gene)
+
+  pat_df <- filter(gene_df, Pathogenicity_category == "Pathogenic")
+  if (nrow(pat_df) == 0L) return(NULL)
+
+  # Stage 1: exclude features with >20% missing in pathogenic variants
+  missing_pct <- pat_df %>%
+    summarise(across(all_of(AUC_cols_all), ~ mean(is.na(.)) * 100)) %>%
+    as.list() %>% unlist()
+  cols_low_missing <- names(missing_pct)[!is.na(missing_pct) & missing_pct < 20]
+
+  # Stage 2: require >=10 non-NA in both classes
+  cols_enough_data <- gene_df %>%
+    select(Pathogenicity_category, any_of(cols_low_missing)) %>%
+    pivot_longer(-Pathogenicity_category, names_to = "predictor",
+                 values_to = "score", values_drop_na = TRUE) %>%
+    count(predictor, Pathogenicity_category, name = "n") %>%
+    pivot_wider(names_from = Pathogenicity_category, values_from = n, values_fill = 0L) %>%
+    filter(coalesce(Benign, 0L) >= 10L, coalesce(Pathogenic, 0L) >= 10L) %>%
+    pull(predictor)
+
+  if (length(cols_enough_data) == 0L) return(NULL)
+
+  make_metrics_df(gene_df, cols_enough_data) %>%
+    mutate(dataset = row$dataset, gene = row$gene)
+}
+
+results_list <- mclapply(seq_len(nrow(combos)), compute_gene_metrics, mc.cores = n_cores)
+all_results  <- bind_rows(Filter(Negate(is.null), results_list))
+
+# Mask all metrics to NA for buccal predictors where gene is not on the buccal panel
+numeric_metric_cols <- c("AUC_full", "AUC_full_lower", "AUC_full_upper", "AUPRC",
+                         "Threshold", "Sensitivity", "Specificity", "Precision",
+                         "Recall", "Accuracy", "BalancedAccuracy", "F1", "MCC")
+all_results <- all_results %>%
+  mutate(.buccal_mask = Predictor %in% buccal_predictors & !gene %in% buccal_panel_genes) %>%
+  mutate(across(all_of(numeric_metric_cols),  ~ if_else(.buccal_mask, NA_real_,      .))) %>%
+  mutate(across(c(Observed_direction, Expected_direction),
+                                               ~ if_else(.buccal_mask, NA_character_, .))) %>%
+  mutate(Consistent_with_expected = if_else(.buccal_mask, NA, Consistent_with_expected)) %>%
+  select(-.buccal_mask)
+
+message(nrow(all_results), " rows computed across ",
+        n_distinct(all_results$gene), " genes and ",
+        n_distinct(all_results$dataset), " datasets")
+
+all_results
+```
+
+# Export
+
+```{r export}
+dir.create("../../../Data/Tables", recursive = TRUE, showWarnings = FALSE)
+
+write_csv(all_results,
+  paste0("../../../Data/AUC_tables/Gene_group_hold_out_models/Single_feature_AUCs_individual_genes_",
+         date, ".csv"))
+write_csv(all_results,
+  "../../../Data/Tables/Gene_group_hold_out_single_feature_metrics.csv")
+```

@@ -1,0 +1,181 @@
+---
+title: "Define cancer DD gene mechanism sets"
+format:
+  html:
+    self-contained: true
+    toc: true
+    code-fold: true
+editor: visual
+---
+
+# Aim
+
+**Documentation record** — outputs already exist in `Data/Gene_definitions/`. Re-run only if DDG2P or COSMIC CGC inputs change.
+
+Define DD genes with monoallelic inheritance that overlap with somatic selection genes or known cancer genes (COSMIC CGC), then assign each to one of three mechanism groups:
+
+-   **AltFunc**: AltFunc DD genes that are COSMIC oncogenes with a missense mutation pattern
+-   **LOF**: LOF_AD DD genes that are COSMIC TSGs
+-   **Other**: remaining monoallelic DDG2P genes that overlap with somatic selection or cancer genes
+-   **RASopathy**: ClinGen VCEP RASopathy gene panel (defined separately)
+
+Gene set definitions use Set 1 criteria (COSMIC oncogenes with missense filter). See `Archived_scripts/` for Set 2 (COSMIC oncogenes, no missense filter) and Set 3 (oncoKB) exploratory definitions.
+
+```{r}
+library(tidyverse)
+library(janitor)
+library(DT)
+```
+
+# Define somatic selection genes
+
+Source: Inigo and Rahelah's Twins UK papers (sperm and buccal nanoseq).
+
+```{r}
+sperm_selection_genes <- c(
+  "PTPN11", "MIB1", "RIT1", "FGFR3", "EP300", "FGFR2", "KDM5B", "NF1", "SMAD6",
+  "CUL3", "RASA2", "PRRC2A", "PTEN", "ROBO1", "DDX3X", "CSNK2B", "KRAS", "PPM1D",
+  "ARID1A", "BRAF", "HRAS", "KMT2E", "SCAF4", "BMPR2", "TCF12", "CCAR2", "DHX9", "NSD1",
+  "LZTR1", "ARHGAP35", "CBL", "SSX1", "RBM12", "SMAD4", "FAM222B",
+  "KDM5C", "KMT2D", "AR", "CTNNB1", "RAF1"
+)
+
+buccal_selection_genes <- c(
+  "NOTCH1", "FAT1", "TP53", "NOTCH2", "ATM", "MGA", "KMT2C", "ASXL1", "CHEKC2",
+  "TET2", "PPM1D", "BCORL1", "ARID1A", "SETD2", "ZFP36L2", "ARID2", "EP300", "NOTCH3",
+  "KDM5C", "RAC1", "ARID1B", "RBM10", "KDM6A", "STAG2", "EPHA2", "CIC", "SF3B1",
+  "ZFP36L1", "EGFR", "DNMT3A", "PIK3R1", "TP63", "ARID5B", "AJUBA", "FGFR3", "ZNF750",
+  "FUBP1", "CUL3", "KLF5", "PAX9", "FOXP1", "ETV6", "RHOA", "RARG", "SPOP", "SMARCB1",
+  "CCND1", "HLA-B", "EIF1AX", "PIK3CA"
+)
+
+somatic_selection_genes <- union(sperm_selection_genes, buccal_selection_genes)
+```
+
+# Define cancer gene groups from COSMIC
+
+```{r}
+cancer_gene_census <- read_tsv("../../Data/Gene_definitions/Cosmic_CancerGeneCensus_v98_GRCh37.tsv.gz",
+                               show_col_types = FALSE)
+cancer_genes <- cancer_gene_census %>% pull(GENE_SYMBOL) %>% unique()
+somatic_selection_and_cancer_genes <- union(somatic_selection_genes, cancer_genes)
+
+cancer_gene_census_annotated <- cancer_gene_census %>%
+  mutate(onco_mis = case_when(
+    # Missense filter is important for oncogenes: many are pathogenic via fusion or amplification
+    # rather than missense, which would not overlap with germline AF variants
+    grepl("oncogene", ROLE_IN_CANCER) & grepl("Mis", MUTATION_TYPES) ~ "Oncogene_missense",
+    TRUE ~ "Cancer_gene_other"
+  )) %>%
+  mutate(TSG = case_when(
+    grepl("TSG", ROLE_IN_CANCER) ~ "TSG",
+    TRUE ~ "Cancer_gene_other"
+  ))
+
+oncogene_missense <- cancer_gene_census_annotated %>%
+  filter(onco_mis == "Oncogene_missense") %>%
+  pull(GENE_SYMBOL) %>% unique()
+
+TSG <- cancer_gene_census_annotated %>%
+  filter(TSG == "TSG") %>%
+  pull(GENE_SYMBOL) %>% unique()
+```
+
+# DDG2P 2025 — Set 1 gene group definitions
+
+```{r}
+DDG2P_2025 <- read_csv("../../Data/DDG2P/G2P_DD_2025-04-16.csv") %>% clean_names()
+
+DDG2P_2025_dominant <- DDG2P_2025 %>%
+  filter(allelic_requirement %in% c("monoallelic_X_heterozygous", "monoallelic_autosomal")) %>%
+  pull(gene_symbol) %>% unique()
+```
+
+Define DD dominant genes that are also under somatic selection and export:
+
+```{r}
+DD_2025_dominant_somatic <- data.frame(gene_symbol = DDG2P_2025_dominant) %>%
+  filter(gene_symbol %in% somatic_selection_and_cancer_genes)
+
+write_csv(DD_2025_dominant_somatic,
+          "../../Data/Gene_definitions/DDG2P_2025_dominant_selection_genes.csv")
+```
+
+```{r}
+DDG2P_2025_mechanisms <- read_csv("../../Data/DDG2P/DDG2P_2025_annotated_with_gene_groups_040725.csv")
+
+AltFunc_genes_2025 <- DDG2P_2025_mechanisms %>%
+  filter(AltFunc == 1) %>%
+  pull(gene_symbol) %>% unique()
+
+AltFunc_stringent_genes_2025 <- DDG2P_2025_mechanisms %>%
+  filter(AltFunc_stringent == 1) %>%
+  pull(gene_symbol) %>% unique()
+
+LOF_AD_genes_2025 <- DDG2P_2025_mechanisms %>%
+  filter(LOF_AD == 1) %>%
+  pull(gene_symbol) %>% unique()
+
+# Set 1: AltFunc DD genes × COSMIC oncogenes with missense pattern
+AltFunc_onco_genes_2025 <- intersect(AltFunc_genes_2025, oncogene_missense)
+AltFunc_stringent_onco_gene_2025 <- intersect(AltFunc_stringent_genes_2025, oncogene_missense)
+
+# Set 1: LOF_AD DD genes × COSMIC TSGs
+LOF_AD_TSGs_2025 <- intersect(LOF_AD_genes_2025, TSG)
+
+# Set 1: remaining dominant DDG2P genes that overlap with somatic selection / cancer genes
+DD_cancer_other_2025 <- intersect(DDG2P_2025_dominant, somatic_selection_and_cancer_genes) %>%
+  setdiff(LOF_AD_TSGs_2025) %>%
+  setdiff(AltFunc_onco_genes_2025)
+```
+
+## Gene group sizes
+
+```{r}
+data.frame(
+  Group = c("AltFunc (liberal)", "AltFunc (stringent)", "LOF", "Other", "Dominant somatic"),
+  n = c(
+    length(AltFunc_onco_genes_2025),
+    length(AltFunc_stringent_onco_gene_2025),
+    length(LOF_AD_TSGs_2025),
+    length(DD_cancer_other_2025),
+    nrow(DD_2025_dominant_somatic)
+  )
+) %>% datatable()
+```
+
+Note: AltFunc and LOF groups are not mutually exclusive. Overlap:
+
+```{r}
+intersect(AltFunc_onco_genes_2025, LOF_AD_TSGs_2025)
+```
+
+## Export Set 1
+
+```{r}
+write_csv(data.frame(gene_symbol = AltFunc_onco_genes_2025),
+          "../../Data/Gene_definitions/DDG2P_2025_dominant_selection_genes_AltFunc.csv")
+
+write_csv(data.frame(gene_symbol = AltFunc_stringent_onco_gene_2025),
+          "../../Data/Gene_definitions/DDG2P_2025_dominant_selection_genes_AltFunc_stringent.csv")
+
+write_csv(data.frame(gene_symbol = LOF_AD_TSGs_2025),
+          "../../Data/Gene_definitions/DDG2P_2025_dominant_selection_genes_LOF.csv")
+
+write_csv(data.frame(gene_symbol = DD_cancer_other_2025),
+          "../../Data/Gene_definitions/DDG2P_2025_dominant_selection_genes_other.csv")
+```
+
+# Define RASopathy genes
+
+Source: ClinGen RASopathy VCEP gene list (<https://clinicalgenome.org/affiliation/50021/>). NF1 and LZTR1 excluded — LOF mechanism, phenotypically distinct, and dominate ClinVar counts for the group.
+
+```{r}
+RASopathy_genes_VCEP <- c(
+  "BRAF", "HRAS", "KRAS", "MAP2K1", "MAP2K2", "NRAS",
+  "PTPN11", "RAF1", "RIT1", "SHOC2", "SOS1", "SOS2"
+)
+
+write_csv(data.frame(gene = RASopathy_genes_VCEP),
+          "../../Data/Gene_definitions/RASopathy_genes_VCEP_030425.csv")
+```

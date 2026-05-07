@@ -1,0 +1,231 @@
+---
+title: "Likelihood ratio threshold calculations"
+output: html_document
+date: "2026-02-20"
+---
+
+# Aim
+
+1. Calculate likelihood ratio thresholds for different somatic data features and counts to see what level of ACMG evidence this translates to if somatic data were to be used for germline clinical variant interpretation.
+
+   - Contrast different data sources (ClinVar long vs ClinVar unique vs DNMs)
+   - Add confidence intervals of LRs
+
+2. Choose somatic evidence levels and annotate variant lists of interest
+
+```{r, message=FALSE}
+library(tidyverse)
+
+dir.create("../../Data/LR_calculations", recursive = TRUE, showWarnings = FALSE)
+```
+
+# Load data
+
+```{r, message=FALSE}
+read_variants <- function(path) {
+  read_tsv(path, show_col_types = FALSE) %>%
+    dplyr::rename(
+      n_sperm             = n_sperm_twinsUK,
+      n_sperm_codon_count = n_sperm_twinsUK_codon_count
+    )
+}
+
+clinvar_path   <- read_variants("../../Data/Variant_lists/Clinvar_DDG2P_missense_path_annot_240426_public.tsv.gz")
+clinvar_VUS    <- read_variants("../../Data/Variant_lists/Clinvar_DDG2P_missense_VUS_annot_240426_public.tsv.gz")
+clinvar_benign <- read_variants("../../Data/Variant_lists/Clinvar_DDG2P_missense_benign_annot_240426_public.tsv.gz")
+DNMs_31k       <- read_variants("../../Data/Variant_lists/DNMs_31k_missense_annot_240426_public.tsv.gz")
+biobank_benign <- read_variants("../../Data/Variant_lists/Biobank_missense_variants_annot_240426_public.tsv.gz")
+```
+
+```{r, message=FALSE}
+altfunc       <- read_csv("../../Data/Gene_definitions/DDG2P_2025_dominant_selection_genes_AltFunc.csv",
+                          show_col_types = FALSE) %>% pull(gene_symbol)
+lof           <- read_csv("../../Data/Gene_definitions/DDG2P_2025_dominant_selection_genes_LOF.csv",
+                          show_col_types = FALSE) %>% pull(gene_symbol)
+other         <- read_csv("../../Data/Gene_definitions/DDG2P_2025_dominant_selection_genes_other.csv",
+                          show_col_types = FALSE) %>% pull(gene_symbol)
+RASopathies   <- read_csv("../../Data/Gene_definitions/RASopathy_genes_VCEP_030425.csv",
+                          show_col_types = FALSE) %>% pull(gene)
+altfunc_minus_RAS <- setdiff(altfunc, RASopathies)
+macrocephaly  <- read_csv("../../Data/Gene_definitions/Macrocephaly_monoallelic_DD_somatic_genes.csv",
+                          show_col_types = FALSE) %>% pull(gene)
+
+all_genes <- unique(c(clinvar_path$gene, biobank_benign$gene, DNMs_31k$gene))
+```
+
+# Calculate LRs
+
+```{r}
+transmute_variants <- function(df, class_label) {
+  df %>% transmute(
+    gene,
+    n_COSMIC             = as.numeric(n_COSMIC),
+    n_sperm              = as.numeric(n_sperm),
+    n_sperm_codon_count  = as.numeric(n_sperm_codon_count),
+    n_COSMIC_codon_count = as.numeric(n_COSMIC_codon_count),
+    hotcodon_cancer      = as.logical(hotcodon_cancer),
+    class                = class_label
+  )
+}
+
+ben <- transmute_variants(biobank_benign, "Benign")
+
+Clinvar_unique_vs_biobank <- bind_rows(transmute_variants(clinvar_path, "Pathogenic"), ben)
+
+Clinvar_long_vs_biobank <- bind_rows(
+  clinvar_path %>%
+    mutate(NumberSubmitters_clean = ifelse(is.na(NumberSubmitters_clean), 1L, NumberSubmitters_clean)) %>%
+    uncount(NumberSubmitters_clean) %>%
+    transmute_variants("Pathogenic"),
+  ben
+)
+
+DNMs_31k_vs_biobank <- bind_rows(
+  DNMs_31k %>%
+    mutate(n_DNM = ifelse(is.na(n_DNM), 1L, n_DNM)) %>%
+    uncount(n_DNM) %>%
+    transmute_variants("Pathogenic"),
+  ben
+)
+
+DNMs_31k_unique_vs_biobank <- bind_rows(
+  transmute_variants(DNMs_31k, "Pathogenic"),
+  ben
+)
+
+data_sets <- list(
+  Clinvar_unique_vs_biobank   = Clinvar_unique_vs_biobank,
+  Clinvar_long_vs_biobank     = Clinvar_long_vs_biobank,
+  DNMs_31k_vs_biobank         = DNMs_31k_vs_biobank,
+  DNMs_31k_unique_vs_biobank  = DNMs_31k_unique_vs_biobank
+)
+```
+
+```{r}
+gene_groups <- list(
+  AllGenes          = all_genes,
+  AltFunc           = altfunc,
+  LOF               = lof,
+  Other             = other,
+  RASopathies       = RASopathies,
+  AltFunc_minus_RAS = altfunc_minus_RAS,
+  MacrocephalyGenes = macrocephaly
+)
+```
+
+```{r}
+rule_tbl <- tibble::tribble(
+  ~rule, ~test_pos_expr,
+
+  "n_COSMIC > 0",   quote(n_COSMIC > 0),
+  "n_COSMIC > 1",   quote(n_COSMIC > 1),
+  "n_COSMIC > 2",   quote(n_COSMIC > 2),
+  "n_COSMIC > 3",   quote(n_COSMIC > 3),
+  "n_COSMIC 1-4",   quote(n_COSMIC >= 1 & n_COSMIC <= 4),
+  "n_COSMIC > 5",   quote(n_COSMIC > 5),
+  "n_COSMIC > 10",  quote(n_COSMIC > 10),
+  "n_COSMIC > 20",  quote(n_COSMIC > 20),
+  "n_COSMIC > 50",  quote(n_COSMIC > 50),
+
+  "n_sperm > 0",              quote(n_sperm > 0),
+  "n_sperm > 1",              quote(n_sperm > 1),
+  "n_sperm > 5",              quote(n_sperm > 5),
+
+  "n_sperm_codon_count > 0",  quote(n_sperm_codon_count > 0),
+  "n_sperm_codon_count > 1",  quote(n_sperm_codon_count > 1),
+  "n_sperm_codon_count > 2",  quote(n_sperm_codon_count > 2),
+  "n_sperm_codon_count > 3",  quote(n_sperm_codon_count > 3),
+  "n_sperm_codon_count > 5",  quote(n_sperm_codon_count > 5),
+
+  "n_COSMIC_codon_count > 0",  quote(n_COSMIC_codon_count > 0),
+  "n_COSMIC_codon_count > 1",  quote(n_COSMIC_codon_count > 1),
+  "n_COSMIC_codon_count > 2",  quote(n_COSMIC_codon_count > 2),
+  "n_COSMIC_codon_count > 3",  quote(n_COSMIC_codon_count > 3),
+  "n_COSMIC_codon_count 1-4",  quote(n_COSMIC_codon_count >= 1 & n_COSMIC_codon_count <= 4),
+  "n_COSMIC_codon_count > 5",  quote(n_COSMIC_codon_count > 5),
+  "n_COSMIC_codon_count > 10", quote(n_COSMIC_codon_count > 10),
+  "n_COSMIC_codon_count > 20", quote(n_COSMIC_codon_count > 20),
+  "n_COSMIC_codon_count > 50", quote(n_COSMIC_codon_count > 50),
+
+  "hotcodon_cancer", quote(hotcodon_cancer == TRUE)
+)
+```
+
+```{r}
+calc_lr <- function(df, rule_name, test_pos_expr) {
+  df2 <- df %>% mutate(test_pos = as.logical(eval(test_pos_expr)))
+
+  TP <- sum(df2$class == "Pathogenic" & df2$test_pos,  na.rm = TRUE)
+  FN <- sum(df2$class == "Pathogenic" & !df2$test_pos, na.rm = TRUE)
+  FP <- sum(df2$class == "Benign"     & df2$test_pos,  na.rm = TRUE)
+  TN <- sum(df2$class == "Benign"     & !df2$test_pos, na.rm = TRUE)
+
+  if (any(c(TP, FN, FP, TN) == 0)) {
+    TP <- TP + 0.5; FN <- FN + 0.5; FP <- FP + 0.5; TN <- TN + 0.5
+  }
+
+  sens <- TP / (TP + FN)
+  spec <- TN / (TN + FP)
+
+  lr_pos <- sens / (1 - spec)
+  lr_neg <- (1 - sens) / spec
+
+  se_log_lr_pos <- sqrt((1/TP) - (1/(TP+FN)) + (1/FP) - (1/(FP+TN)))
+  se_log_lr_neg <- sqrt((1/FN) - (1/(TP+FN)) + (1/TN) - (1/(FP+TN)))
+
+  tibble(
+    rule         = rule_name,
+    TP = TP, FN = FN, FP = FP, TN = TN,
+    sensitivity    = sens,
+    specificity    = spec,
+    LR_pos         = lr_pos,
+    LR_pos_low95   = exp(log(lr_pos) - 1.96 * se_log_lr_pos),
+    LR_pos_high95  = exp(log(lr_pos) + 1.96 * se_log_lr_pos),
+    LR_neg         = lr_neg,
+    LR_neg_low95   = exp(log(lr_neg) - 1.96 * se_log_lr_neg),
+    LR_neg_high95  = exp(log(lr_neg) + 1.96 * se_log_lr_neg)
+  )
+}
+```
+
+```{r}
+run_lr <- function(df, data_set_label, path_source, long_or_unique) {
+  imap_dfr(gene_groups, function(genes, group_name) {
+    df_group <- df %>% filter(gene %in% genes)
+    map2_dfr(rule_tbl$rule, rule_tbl$test_pos_expr, function(r, expr) {
+      calc_lr(df_group, r, expr) %>% mutate(gene_group = group_name, .before = 1)
+    })
+  }) %>%
+    mutate(data_set = data_set_label, path_source = path_source,
+           long_or_unique = long_or_unique)
+}
+
+lr_results <- bind_rows(
+  run_lr(Clinvar_unique_vs_biobank,   "clinvar_unique_public",   "clinvar", "unique"),
+  run_lr(Clinvar_long_vs_biobank,     "clinvar_long_public",     "clinvar", "long"),
+  run_lr(DNMs_31k_vs_biobank,         "DNMs_31k_long_public",    "DNM_31k", "long"),
+  run_lr(DNMs_31k_unique_vs_biobank,  "DNMs_31k_unique_public",  "DNM_31k", "unique")
+) %>%
+  mutate(feature = case_when(
+    str_detect(rule, "n_COSMIC ")           ~ "n_COSMIC",
+    str_detect(rule, "n_sperm_codon_count") ~ "n_sperm_codon_count",
+    str_detect(rule, "n_sperm ")            ~ "n_sperm",
+    str_detect(rule, "n_COSMIC_codon_count")~ "n_COSMIC_codon_count",
+    str_detect(rule, "hotcodon_cancer")     ~ "hotcodon_cancer"
+  )) %>%
+  mutate(threshold = case_when(
+    str_detect(rule, "n_COSMIC > ")              ~ paste0(">", str_extract(rule, "(?<=n_COSMIC > )\\d+")),
+    str_detect(rule, "n_COSMIC 1-4")             ~ "1-4",
+    str_detect(rule, "n_sperm > ")               ~ paste0(">", str_extract(rule, "(?<=n_sperm > )\\d+")),
+    str_detect(rule, "n_sperm_codon_count > ")   ~ paste0(">", str_extract(rule, "(?<=n_sperm_codon_count > )\\d+")),
+    str_detect(rule, "n_COSMIC_codon_count > ")  ~ paste0(">", str_extract(rule, "(?<=n_COSMIC_codon_count > )\\d+")),
+    str_detect(rule, "n_COSMIC_codon_count 1-4") ~ "1-4",
+    str_detect(rule, "hotcodon_cancer")          ~ "TRUE"
+  ))
+```
+
+## Export LR results
+
+```{r}
+write_csv(lr_results, "../../Data/LR_calculations/LR_table.csv")
+```

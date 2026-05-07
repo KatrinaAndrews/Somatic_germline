@@ -1,0 +1,317 @@
+---
+title: "Data preparation — gene group ML model input"
+output: html_document
+date: "2025-02-20"
+---
+
+# Aims
+
+Prepare data for input into supervised ML models and single-feature AUC generation, stratified by gene group.
+
+Steps:
+
+1. Import ClinVar pathogenic, DNM, and Biobank variant lists; remove known pathogenic variants from Biobank
+2. Standardise column names (rename `_score` suffix, rename TwinsUK sperm columns to generic `n_sperm`)
+3. Combine pathogenic + benign into unique-form dataframes; annotate with gene group flags (Set 1 definitions)
+4. Export pre-split whole datasets (unique and long form) for single-feature AUC and downstream analysis
+5. Select ML feature columns; slice by gene group; split 70/30 train/test
+6. Expand train/test to long_uncontaminated form (train/test split on unique data, then expand)
+7. Export all train/test splits for ML model building
+
+Run script 4 (`Annating_with_clean_NumberSubmissions.Rmd`) before this script — it adds `NumberSubmitters_clean` (germline-only submission count) used here for long-form expansion.
+
+```{r, message=FALSE}
+library(tidyverse)
+library(caret)
+library(glue)
+library(rlang)
+
+dir.create("../../Data/ML_model_input/Gene_group_models", recursive = TRUE, showWarnings = FALSE)
+dir.create("../../Data/ML_model_input/Gene_group_hold_out_models", recursive = TRUE, showWarnings = FALSE)
+```
+
+# Import variant lists
+
+```{r}
+Clinvar_path <- read_tsv("../../Data/Variant_lists/Clinvar_DDG2P_missense_path_annot_240426_public.tsv.gz")
+DNMs         <- read_tsv("../../Data/Variant_lists/DNMs_31k_missense_annot_240426_public.tsv.gz")
+Biobank      <- read_tsv("../../Data/Variant_lists/Biobank_missense_variants_annot_240426_public.tsv.gz")
+```
+
+# Remove pathogenic variants from Biobank
+
+```{r}
+Biobank <- Biobank %>%
+  filter(!var_ID %in% c(Clinvar_path$var_ID, DNMs$var_ID))
+```
+
+# Standardise columns
+
+Select features of interest, convert "." to NA in dbNSFP columns, remove `_score` suffix, rename TwinsUK sperm columns to generic names.
+
+```{r}
+desired_CEPs <- c(
+  "SIFT_score", "Polyphen2_HVAR_score", "MutationAssessor_score",
+  "MetaSVM_score", "M-CAP_score", "ESM1b_score",
+  "PrimateAI_score", "VARITY_R_score", "CADD_raw",
+  "AlphaMissense_score", "REVEL_score",
+  "popEVE", "ESM1v"
+)
+
+CEPs_to_rename <- c(
+  "SIFT_score", "Polyphen2_HVAR_score", "MutationAssessor_score",
+  "MetaSVM_score", "M-CAP_score", "ESM1b_score",
+  "PrimateAI_score", "VARITY_R_score",
+  "AlphaMissense_score", "REVEL_score"
+)
+
+standardise_variant_df <- function(df, id_col = NULL) {
+  shared_cols <- c(
+    "gene", "var_ID", "chrom", "pos", "ref", "alt",
+    all_of(desired_CEPs),
+    "codon", "codon_change",
+    "n_COSMIC", "n_COSMIC_genome", "n_COSMIC_targeted",
+    "n_COSMIC_codon_count", "n_COSMIC_genome_codon_count", "n_COSMIC_targeted_codon_count",
+    "hotcodon_cancer",
+    "n_sperm_twinsUK", "n_sperm_exomes_twinsUK",
+    "n_sperm_twinsUK_codon_count", "n_sperm_exomes_twinsUK_codon_count",
+    "n_buccal", "n_buccal_codon_count"
+  )
+  if (!is.null(id_col)) shared_cols <- c(shared_cols, id_col)
+
+  df %>%
+    dplyr::select(any_of(shared_cols)) %>%
+    mutate(across(where(is.character) & any_of(desired_CEPs), ~ na_if(., "."))) %>%
+    rename_with(~ str_remove(., "_score$"), any_of(CEPs_to_rename)) %>%
+    dplyr::rename(
+      n_sperm             = n_sperm_twinsUK,
+      n_sperm_exomes      = n_sperm_exomes_twinsUK,
+      n_sperm_codon_count = n_sperm_twinsUK_codon_count,
+      n_sperm_exomes_codon_count = n_sperm_exomes_twinsUK_codon_count
+    )
+}
+
+Clinvar_path <- standardise_variant_df(Clinvar_path, id_col = "NumberSubmitters_clean")
+DNMs         <- standardise_variant_df(DNMs,         id_col = "n_DNM")
+Biobank      <- standardise_variant_df(Biobank)
+```
+
+# Build unique-form path vs benign dataframes
+
+```{r}
+clinvar_mutation_data_unique <- bind_rows(
+  Clinvar_path %>% mutate(Pathogenicity_category = "Pathogenic"),
+  Biobank      %>% mutate(Pathogenicity_category = "Benign")
+)
+
+DNM_mutation_data_unique <- bind_rows(
+  DNMs    %>% mutate(Pathogenicity_category = "Pathogenic"),
+  Biobank %>% mutate(Pathogenicity_category = "Benign")
+)
+```
+
+# Annotate with gene group flags (Set 1)
+
+```{r}
+altfunc          <- read_csv("../../Data/Gene_definitions/DDG2P_2025_dominant_selection_genes_AltFunc.csv")
+altfunc_stringent <- read_csv("../../Data/Gene_definitions/DDG2P_2025_dominant_selection_genes_AltFunc_stringent.csv")
+lof              <- read_csv("../../Data/Gene_definitions/DDG2P_2025_dominant_selection_genes_LOF.csv")
+other            <- read_csv("../../Data/Gene_definitions/DDG2P_2025_dominant_selection_genes_other.csv")
+RASopathies      <- read_csv("../../Data/Gene_definitions/RASopathy_genes_VCEP_030425.csv") %>% pull(gene)
+altfunc_minus_RAS <- setdiff(altfunc$gene_symbol, RASopathies)
+
+annotate_gene_groups <- function(df) {
+  df %>%
+    mutate(
+      altfunc_DD_cancer_gene            = gene %in% altfunc$gene_symbol,
+      altfunc_stringent_DD_cancer_gene  = gene %in% altfunc_stringent$gene_symbol,
+      lof_DD_cancer_gene                = gene %in% lof$gene_symbol,
+      other_DD_cancer_gene              = gene %in% other$gene_symbol,
+      RASopathy_gene                    = gene %in% RASopathies,
+      altfunc_minus_RASopathy_gene      = gene %in% altfunc_minus_RAS
+    )
+}
+
+clinvar_mutation_data_unique_set1 <- annotate_gene_groups(clinvar_mutation_data_unique)
+DNM_mutation_data_unique_set1     <- annotate_gene_groups(DNM_mutation_data_unique)
+```
+
+# Export whole datasets (pre-split)
+
+Used by `Gene_group_single_feature_AUC_AUPRC_F1_MCC.Rmd` and downstream analysis scripts. Long form expands each pathogenic row by `NumberSubmitters_clean` (germline-only count from script 4) or `n_DNM`.
+
+```{r}
+write_csv(
+  clinvar_mutation_data_unique_set1 %>% dplyr::select(-codon, -codon_change),
+  "../../Data/ML_model_input/Gene_group_models/Clinvar_vs_Biobank_unique_set1_240426.csv.gz"
+)
+
+clinvar_mutation_data_long_set1 <- clinvar_mutation_data_unique_set1 %>%
+  mutate(NumberSubmitters_clean = ifelse(is.na(NumberSubmitters_clean), 1, NumberSubmitters_clean)) %>%
+  uncount(NumberSubmitters_clean, .remove = FALSE)
+
+write_csv(
+  clinvar_mutation_data_long_set1 %>% dplyr::select(-codon, -codon_change),
+  "../../Data/ML_model_input/Gene_group_models/Clinvar_vs_Biobank_long_set1_240426.csv.gz"
+)
+
+write_csv(
+  DNM_mutation_data_unique_set1 %>% dplyr::select(-codon, -codon_change),
+  "../../Data/ML_model_input/Gene_group_models/DNM_vs_Biobank_unique_set1_240426.csv.gz"
+)
+
+DNM_mutation_data_long_set1 <- DNM_mutation_data_unique_set1 %>%
+  mutate(n_DNM = ifelse(is.na(n_DNM), 1, n_DNM)) %>%
+  uncount(n_DNM, .remove = FALSE)
+
+write_csv(
+  DNM_mutation_data_long_set1 %>% dplyr::select(-codon, -codon_change),
+  "../../Data/ML_model_input/Gene_group_models/DNM_vs_Biobank_long_set1_240426.csv.gz"
+)
+```
+
+# ML feature selection
+
+```{r}
+cols <- c(
+  "var_ID", "gene", "NumberSubmitters_clean", "n_DNM",
+  "altfunc_DD_cancer_gene", "altfunc_stringent_DD_cancer_gene",
+  "altfunc_minus_RASopathy_gene", "lof_DD_cancer_gene",
+  "other_DD_cancer_gene", "RASopathy_gene",
+  "Pathogenicity_category",
+  "n_COSMIC_codon_count", "n_sperm_codon_count", "n_buccal_codon_count",
+  "REVEL", "ESM1b", "AlphaMissense"
+)
+
+nm  <- c("clinvar_mutation_data_unique_set1", "DNM_mutation_data_unique_set1")
+lst <- mget(nm) |> lapply(\(df) dplyr::select(df, dplyr::any_of(cols)))
+list2env(setNames(lst, nm), environment())
+```
+
+# Slice into gene groups
+
+```{r}
+groups <- c(
+  altfunc_DD_cancer_gene            = "altfunc",
+  altfunc_stringent_DD_cancer_gene  = "altfunc_stringent",
+  altfunc_minus_RASopathy_gene      = "altfunc_minus_RAS",
+  lof_DD_cancer_gene                = "lof",
+  other_DD_cancer_gene              = "other",
+  RASopathy_gene                    = "RASopathy"
+)
+
+drop_cols     <- names(groups)
+all_group_label <- "all"
+
+stub <- function(x) sub(
+  "^(.+?)_mutation_data_unique_set(\\d+)(?:_filt2)?$",
+  "\\1_unique_set\\2", x
+)
+
+grid <- tidyr::expand_grid(
+  nm  = nm,
+  col = c(names(groups), all_group_label)
+)
+
+out <- pmap(grid, function(nm, col) {
+  df         <- get(nm)
+  group_name <- if (col == all_group_label) "all" else groups[[col]]
+  name       <- paste0(stub(nm), "_", group_name)
+
+  sliced <- if (col == all_group_label) {
+    df %>% dplyr::select(-all_of(drop_cols))
+  } else {
+    df %>% filter(.data[[col]] == TRUE) %>% dplyr::select(-all_of(drop_cols))
+  }
+  setNames(list(sliced), name)
+}) |> flatten()
+
+list2env(out, .GlobalEnv)
+```
+
+# Train / test split (70/30)
+
+```{r}
+set.seed(40)
+
+split_train_test <- function(df_list) {
+  result <- list()
+  for (df_name in names(df_list)) {
+    df <- df_list[[df_name]]
+    idx <- createDataPartition(y = df$Pathogenicity_category, p = 0.7, list = FALSE)
+    result[[paste0(df_name, "_train")]] <- df[idx, ]
+    result[[paste0(df_name, "_test")]]  <- df[-idx, ]
+  }
+  result
+}
+
+train_test_splits <- split_train_test(out)
+list2env(train_test_splits, envir = .GlobalEnv)
+```
+
+# Create long_uncontaminated data
+
+Train/test split on unique data, then expand to long form to avoid train/test contamination while maximising power.
+
+```{r}
+expand_to_long_uncontaminated <- function(data_name) {
+  gene_groups <- c("altfunc", "lof", "other", "RASopathy", "altfunc_minus_RAS", "all")
+  sets   <- c("set1")
+  result <- list()
+
+  for (group in gene_groups) {
+    for (set in sets) {
+      train_df <- get(paste0(data_name, "_unique_", set, "_", group, "_train"))
+      test_df  <- get(paste0(data_name, "_unique_", set, "_", group, "_test"))
+
+      if (data_name == "clinvar") {
+        train_df <- train_df %>% mutate(NumberSubmitters_clean = ifelse(is.na(NumberSubmitters_clean), 1, NumberSubmitters_clean))
+        test_df  <- test_df  %>% mutate(NumberSubmitters_clean = ifelse(is.na(NumberSubmitters_clean), 1, NumberSubmitters_clean))
+        train_long <- train_df %>% uncount(NumberSubmitters_clean, .remove = FALSE)
+        test_long  <- test_df  %>% uncount(NumberSubmitters_clean, .remove = FALSE)
+      } else {
+        train_df <- train_df %>% mutate(n_DNM = ifelse(is.na(n_DNM), 1, n_DNM))
+        test_df  <- test_df  %>% mutate(n_DNM = ifelse(is.na(n_DNM), 1, n_DNM))
+        train_long <- train_df %>% uncount(n_DNM, .remove = FALSE)
+        test_long  <- test_df  %>% uncount(n_DNM, .remove = FALSE)
+      }
+
+      result[[paste0(data_name, "_long_uncontaminated_", set, "_", group, "_train")]] <- train_long
+      result[[paste0(data_name, "_long_uncontaminated_", set, "_", group, "_test")]]  <- test_long
+    }
+  }
+  result
+}
+
+long_uncontaminated_dfs <- c(
+  expand_to_long_uncontaminated("clinvar"),
+  expand_to_long_uncontaminated("DNM")
+)
+
+list2env(long_uncontaminated_dfs, envir = .GlobalEnv)
+```
+
+# Export ML model input files
+
+```{r}
+data_types  <- c("clinvar_unique", "DNM_unique", "clinvar_long_uncontaminated", "DNM_long_uncontaminated")
+sets        <- c("set1")
+gene_groups <- c("altfunc", "lof", "other", "RASopathy", "altfunc_minus_RAS", "all")
+
+df_list <- character(0)
+for (data in data_types) {
+  for (gene in gene_groups) {
+    for (set in sets) {
+      df_list <- c(df_list,
+                   paste0(data, "_", set, "_", gene, "_train"),
+                   paste0(data, "_", set, "_", gene, "_test"))
+    }
+  }
+}
+
+output_folder <- "../../Data/ML_model_input/Gene_group_models/"
+
+for (df_name in df_list) {
+  write_csv(get(df_name), file = file.path(output_folder, paste0(df_name, "_240426.csv.gz")))
+}
+```

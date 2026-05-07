@@ -1,0 +1,110 @@
+---
+title: "Gene upset plot: DD, cancer, somatic selection"
+output:
+  html_document:
+    df_print: paged
+    code_folding: hide
+  pdf_document: default
+date: "2026-04-27"
+---
+
+# Aim
+
+Examine the overlap of gene groups:
+
+- DD genes
+- Cancer genes
+- Genes driving somatic selection in healthy tissues
+
+```{r, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(UpSetR)
+library(janitor)
+
+dir.create("../../../Data/Figures/Final", recursive = TRUE, showWarnings = FALSE)
+
+theme_set(theme_bw(14))
+```
+
+```{r, message=FALSE, warning=FALSE}
+DD_genes <- read_csv("../../../Data/DDG2P/G2P_DD_2025-04-16.csv",
+                     show_col_types = FALSE) %>%
+  clean_names() %>%
+  pull(gene_symbol) %>% unique()
+
+DD_dominant_genes <- read_csv("../../../Data/DDG2P/G2P_DD_2025-04-16.csv",
+                               show_col_types = FALSE) %>%
+  clean_names() %>%
+  filter(allelic_requirement %in% c("monoallelic_autosomal",
+                                    "monoallelic_X_heterozygous")) %>%
+  pull(gene_symbol) %>% unique()
+
+COSMIC_cancer_genes <- read_tsv("../../../Data/Gene_definitions/Cosmic_CancerGeneCensus_v98_GRCh37.tsv.gz",
+                                show_col_types = FALSE) %>%
+  pull(GENE_SYMBOL) %>% unique()
+
+sperm_selection_genes <- c(
+  "PTPN11", "MIB1", "RIT1", "FGFR3", "EP300", "FGFR2", "KDM5B", "NF1",
+  "SMAD6", "CUL3", "RASA2", "PRRC2A", "PTEN", "ROBO1", "DDX3X", "CSNK2B",
+  "KRAS", "PPM1D", "ARID1A", "BRAF", "HRAS", "KMT2E", "SCAF4", "BMPR2",
+  "TCF12", "CCAR2", "DHX9", "NSD1", "LZTR1", "ARHGAP35", "CBL", "SSX1",
+  "RBM12", "SMAD4", "FAM222B", "KDM5C", "KMT2D", "AR", "CTNNB1", "RAF1"
+)
+
+buccal_selection_genes <- c(
+  "NOTCH1", "FAT1", "TP53", "NOTCH2", "ATM", "MGA", "KMT2C", "ASXL1",
+  "CHEK2", "TET2", "PPM1D", "BCORL1", "ARID1A", "SETD2", "ZFP36L2", "ARID2",
+  "EP300", "NOTCH3", "KDM5C", "RAC1", "ARID1B", "RBM10", "KDM6A", "STAG2",
+  "EPHA2", "CIC", "SF3B1", "ZFP36L1", "EGFR", "DNMT3A", "PIK3R1", "TP63",
+  "ARID5B", "AJUBA", "FGFR3", "ZNF750", "FUBP1", "CUL3", "KLF5", "PAX9",
+  "FOXP1", "ETV6", "RHOA", "RARG", "SPOP", "SMARCB1", "CCND1", "HLA-B",
+  "EIF1AX", "PIK3CA"
+)
+```
+
+# Upset plot: all DD genes
+
+```{r, fig.width=7, fig.height=4}
+genes_list_all <- list(
+  DD              = DD_genes,
+  Cancer          = COSMIC_cancer_genes,
+  `Sperm selection`  = sperm_selection_genes,
+  `Buccal selection` = buccal_selection_genes
+)
+
+upset(fromList(genes_list_all), order.by = "freq")
+```
+
+# Upset plot: dominant DD genes
+
+```{r, fig.width=7, fig.height=4}
+genes_list_dominant <- list(
+  `Dominant DD`      = DD_dominant_genes,
+  Cancer             = COSMIC_cancer_genes,
+  `Sperm selection`  = sperm_selection_genes,
+  `Buccal selection` = buccal_selection_genes
+)
+
+upset(fromList(genes_list_dominant), order.by = "freq")
+```
+
+```{r}
+# Export gene lists so Figures_for_somatic_germline_paper.Rmd can generate the figure
+upset_export <- bind_rows(
+  tibble(gene = genes_list_dominant[["Dominant DD"]],     list_name = "Dominant DD"),
+  tibble(gene = genes_list_dominant[["Cancer"]],          list_name = "Cancer"),
+  tibble(gene = genes_list_dominant[["Sperm selection"]], list_name = "Sperm selection"),
+  tibble(gene = genes_list_dominant[["Buccal selection"]], list_name = "Buccal selection")
+)
+write_csv(upset_export, "../../../Data/Gene_definitions/Upset_gene_lists_dominant.csv")
+```
+
+# Summary counts
+
+```{r}
+cat("n all DD genes:", length(DD_genes), "\n")
+cat("n dominant DD genes:", length(DD_dominant_genes), "\n")
+cat("n COSMIC cancer genes:", length(COSMIC_cancer_genes), "\n")
+cat("n sperm selection genes:", length(sperm_selection_genes), "\n")
+cat("n buccal selection genes:", length(buccal_selection_genes), "\n")
+```

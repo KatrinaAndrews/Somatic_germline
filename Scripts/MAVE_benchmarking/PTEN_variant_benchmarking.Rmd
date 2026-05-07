@@ -1,0 +1,305 @@
+---
+title: "PTEN benchmarking: public data"
+output:
+  html_document:
+    df_print: paged
+    code_folding: hide
+  pdf_document: default
+date: "2026-02-20"
+---
+
+# Aim
+
+Assess the predictive power of somatic data to distinguish benign from pathogenic PTEN
+germline variants using published data only.
+
+Data sources:
+- DNMs: trio WES/WGS (31k cohort)
+- ClinVar: (likely) pathogenic germline variants
+- Biobank: variants seen in UK Biobank, excluding DNMs and ClinVar (likely) pathogenic
+
+All lists are subset to missense variants in the MANE select transcript, annotated
+with somatic features.
+
+```{r, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(pROC)
+library(janitor)
+
+dir.create("../../Data/MAVE_benchmarking", recursive = TRUE, showWarnings = FALSE)
+
+read_gene <- function(path, gene_name) {
+  read_tsv(path, show_col_types = FALSE) %>%
+    filter(gene == gene_name) %>%
+    dplyr::rename(
+      n_sperm             = n_sperm_twinsUK,
+      n_sperm_codon_count = n_sperm_twinsUK_codon_count
+    )
+}
+
+PTEN_Biobank      <- read_gene("../../Data/Variant_lists/Biobank_missense_variants_annot_240426_public.tsv.gz",  "PTEN")
+PTEN_clinvar_path <- read_gene("../../Data/Variant_lists/Clinvar_DDG2P_missense_path_annot_240426_public.tsv.gz","PTEN")
+PTEN_DNMs         <- read_gene("../../Data/Variant_lists/DNMs_31k_missense_annot_240426_public.tsv.gz",          "PTEN")
+
+PTEN_clinvar_phenotype_terms <- read_tsv(
+  "../../Data/Clinvar_060225/Clinvar_build_38_DDG2P_germline_path_missense.tsv.gz",
+  show_col_types = FALSE
+) %>% filter(GeneSymbol == "PTEN")
+
+```
+
+```{r, message=FALSE, warning=FALSE}
+desired_CEPs  <- c("PrimateAI_score", "VARITY_R_score", "CADD_raw",
+                   "AlphaMissense_score", "REVEL_score")
+new_CEP_names <- c("PrimateAI", "VARITY_R", "CADD_raw", "AlphaMissense", "REVEL")
+
+variant_cols <- c("gene", "codon_change",
+                  "REVEL_score", "AlphaMissense_score", "CADD_raw",
+                  "VARITY_R_score", "PrimateAI_score",
+                  "n_COSMIC", "n_COSMIC_codon_count",
+                  "n_sperm", "n_sperm_codon_count",
+                  "n_buccal", "n_buccal_codon_count",
+                  "hotcodon_cancer", "group")
+
+clean_CEPs <- function(df) {
+  df %>%
+    mutate(across(where(is.character) & all_of(desired_CEPs), ~ na_if(., "."))) %>%
+    mutate(across(all_of(desired_CEPs), as.numeric)) %>%
+    rename_with(~ str_remove(., "_score$"), all_of(desired_CEPs))
+}
+
+pre_cols <- c(setdiff(variant_cols, "group"), "NumberSubmitters_clean", "n_DNM")
+
+clinvar_biobank_df <- bind_rows(
+  PTEN_clinvar_path %>% dplyr::select(any_of(pre_cols)) %>% mutate(group = "Clinvar_pathogenic"),
+  PTEN_Biobank      %>% dplyr::select(any_of(pre_cols)) %>% mutate(group = "Biobank")
+) %>% dplyr::select(all_of(variant_cols)) %>% clean_CEPs()
+
+clinvar_long_biobank_df <- bind_rows(
+  PTEN_clinvar_path %>%
+    dplyr::select(any_of(pre_cols)) %>%
+    mutate(NumberSubmitters_clean = coalesce(NumberSubmitters_clean, 1L)) %>%
+    uncount(NumberSubmitters_clean) %>%
+    mutate(group = "Clinvar_pathogenic"),
+  PTEN_Biobank %>% dplyr::select(any_of(pre_cols)) %>% mutate(group = "Biobank")
+) %>% dplyr::select(all_of(variant_cols)) %>% clean_CEPs()
+
+DNM_biobank_df <- bind_rows(
+  PTEN_DNMs %>%
+    dplyr::select(any_of(pre_cols)) %>%
+    mutate(n_DNM = coalesce(n_DNM, 1L)) %>%
+    uncount(n_DNM) %>%
+    mutate(group = "DNM_pathogenic"),
+  PTEN_Biobank %>% dplyr::select(any_of(pre_cols)) %>% mutate(group = "Biobank")
+) %>% dplyr::select(all_of(variant_cols)) %>% clean_CEPs()
+```
+
+```{r, message=FALSE, warning=FALSE}
+activity_MAVE  <- read_csv("../../Data/MAVE/Fowler_PTEN_analysis/Mighell_PTEN_phosphatase_data.csv",
+                            show_col_types = FALSE) %>% clean_names()
+abundance_MAVE <- read_tsv("../../Data/MAVE/Fowler_PTEN_analysis/13073_2021_984_MOESM2_ESM.tsv",
+                            show_col_types = FALSE)
+```
+
+# Number of PTEN variants
+
+```{r}
+cat("n (likely) pathogenic ClinVar variants:", nrow(PTEN_clinvar_path), "\n")
+cat("n Biobank variants:", nrow(PTEN_Biobank), "\n")
+cat("n unique DNMs (31k):", nrow(PTEN_DNMs), "\n")
+cat("n total DNMs (31k):", sum(PTEN_DNMs$n_DNM, na.rm = TRUE), "\n")
+```
+
+# Phenotypes in ClinVar
+
+```{r}
+PTEN_clinvar_phenotype_terms %>% count(PhenotypeList) %>%
+  arrange(desc(n)) %>% dplyr::select(n, PhenotypeList)
+```
+
+# MAVE data
+
+```{r}
+abundance_MAVE_2 <- abundance_MAVE %>%
+  mutate(codon_change = paste0(position, start, ">", position, end)) %>%
+  dplyr::select(codon_change, score_orig) %>%
+  dplyr::rename(abundance_MAVE = score_orig) %>%
+  filter(!is.na(abundance_MAVE), !is.na(codon_change))
+
+activity_MAVE_2 <- activity_MAVE %>%
+  extract(variant_one_letter,
+          into = c("ref", "pos", "alt"),
+          regex = "([A-Z])(\\d+)([A-Z])",
+          remove = FALSE) %>%
+  mutate(codon_change = str_c(pos, ref, ">", pos, alt)) %>%
+  dplyr::select(codon_change, cum_score) %>%
+  dplyr::rename(activity_MAVE = cum_score) %>%
+  filter(!is.na(codon_change), !is.na(activity_MAVE))
+
+clinvar_biobank_df_MAVE <- clinvar_biobank_df %>%
+  left_join(activity_MAVE_2, by = "codon_change") %>%
+  left_join(abundance_MAVE_2, by = "codon_change")
+
+clinvar_long_df_MAVE <- clinvar_long_biobank_df %>%
+  left_join(activity_MAVE_2, by = "codon_change") %>%
+  left_join(abundance_MAVE_2, by = "codon_change")
+
+DNM_biobank_df_MAVE <- DNM_biobank_df %>%
+  left_join(activity_MAVE_2, by = "codon_change") %>%
+  left_join(abundance_MAVE_2, by = "codon_change")
+```
+
+## Percent missingness
+
+```{r}
+bind_rows(
+  clinvar_biobank_df_MAVE %>%
+    pivot_longer(c(activity_MAVE, abundance_MAVE), names_to = "MAVE_type", values_to = "val") %>%
+    group_by(group, MAVE_type) %>%
+    summarise(percent_missing = mean(is.na(val)) * 100, .groups = "drop"),
+  DNM_biobank_df_MAVE %>%
+    filter(group == "DNM_pathogenic") %>%
+    pivot_longer(c(activity_MAVE, abundance_MAVE), names_to = "MAVE_type", values_to = "val") %>%
+    group_by(group, MAVE_type) %>%
+    summarise(percent_missing = mean(is.na(val)) * 100, .groups = "drop")
+) %>% pivot_wider(names_from = MAVE_type, values_from = percent_missing)
+```
+
+## MAVE score distributions {.tabset}
+
+### ClinVar unique vs Biobank {.tabset}
+
+#### Abundance
+
+```{r, fig.width=3, fig.height=2}
+clinvar_biobank_df_MAVE %>% filter(!is.na(abundance_MAVE)) %>%
+  ggplot(aes(x = group, y = abundance_MAVE, fill = group)) +
+  geom_boxplot() + theme_minimal() +
+  labs(title = "PTEN MAVE abundance", x = "", y = "MAVE abundance") +
+  theme(legend.position = "none")
+```
+
+#### Activity
+
+```{r, fig.width=3, fig.height=2}
+clinvar_biobank_df_MAVE %>% filter(!is.na(activity_MAVE)) %>%
+  ggplot(aes(x = group, y = activity_MAVE, fill = group)) +
+  geom_boxplot() + theme_minimal() +
+  labs(title = "PTEN MAVE activity", x = "", y = "MAVE activity") +
+  theme(legend.position = "none")
+```
+
+### DNM long vs Biobank {.tabset}
+
+#### Abundance
+
+```{r, fig.width=3, fig.height=2}
+DNM_biobank_df_MAVE %>% filter(!is.na(abundance_MAVE)) %>%
+  ggplot(aes(x = group, y = abundance_MAVE, fill = group)) +
+  geom_boxplot() + theme_minimal() +
+  labs(title = "PTEN MAVE abundance", x = "", y = "MAVE abundance") +
+  theme(legend.position = "none")
+```
+
+#### Activity
+
+```{r, fig.width=3, fig.height=2}
+DNM_biobank_df_MAVE %>% filter(!is.na(activity_MAVE)) %>%
+  ggplot(aes(x = group, y = activity_MAVE, fill = group)) +
+  geom_boxplot() + theme_minimal() +
+  labs(title = "PTEN MAVE activity", x = "", y = "MAVE activity") +
+  theme(legend.position = "none")
+```
+
+# AUC of somatic and MAVE data {.tabset}
+
+```{r auc-helper}
+features_to_test <- c(new_CEP_names,
+                      "n_COSMIC", "n_COSMIC_codon_count",
+                      "n_sperm", "n_sperm_codon_count",
+                      "n_buccal", "n_buccal_codon_count",
+                      "activity_MAVE", "abundance_MAVE")
+
+calc_aucs <- function(df, path_level) {
+  results <- data.frame(feature = character(), AUC = numeric(),
+                        CI_lower = numeric(), CI_upper = numeric(),
+                        stringsAsFactors = FALSE)
+  for (feat in features_to_test) {
+    roc_obj <- roc(df$group, df[[feat]], levels = c("Biobank", path_level), quiet = TRUE)
+    ci_val  <- ci.auc(roc_obj)
+    results <- rbind(results, data.frame(feature  = feat,
+                                         AUC      = as.numeric(auc(roc_obj)),
+                                         CI_lower = ci_val[1],
+                                         CI_upper = ci_val[3]))
+  }
+  results
+}
+
+colour_features <- function(df) {
+  df %>%
+    mutate(colour = case_when(
+      feature %in% c("n_COSMIC", "n_COSMIC_codon_count") ~ "Cancer",
+      feature %in% c("n_sperm", "n_sperm_codon_count")   ~ "Sperm Nanoseq",
+      feature %in% c("n_buccal", "n_buccal_codon_count") ~ "Buccal Nanoseq",
+      feature %in% c("activity_MAVE", "abundance_MAVE")  ~ "MAVE",
+      TRUE ~ "Computational effect predictor"
+    )) %>%
+    mutate(colour = factor(colour, levels = c(
+      "Computational effect predictor",
+      "Cancer", "Sperm Nanoseq", "Buccal Nanoseq", "MAVE"
+    )))
+}
+
+feature_order_MAVE <- c(new_CEP_names,
+                        "n_COSMIC", "n_COSMIC_codon_count",
+                        "n_sperm", "n_sperm_codon_count",
+                        "n_buccal", "n_buccal_codon_count",
+                        "activity_MAVE", "abundance_MAVE")
+```
+
+```{r compute-aucs}
+results3       <- calc_aucs(clinvar_biobank_df_MAVE, "Clinvar_pathogenic") %>% colour_features()
+results_long_3 <- calc_aucs(clinvar_long_df_MAVE,   "Clinvar_pathogenic") %>% colour_features()
+results_DNM3   <- calc_aucs(DNM_biobank_df_MAVE,    "DNM_pathogenic")     %>% colour_features()
+```
+
+```{r auc-plot-fn}
+auc_plot <- function(df, x_label) {
+  ggplot(df, aes(y = factor(feature, levels = rev(feature_order_MAVE)),
+                 x = AUC, colour = colour)) +
+    geom_point(size = 2) +
+    geom_errorbar(aes(xmin = CI_lower, xmax = CI_upper), width = 0.5) +
+    labs(title = "Value of somatic data in PTEN germline variant impact prediction",
+         x = x_label, y = "", colour = "") +
+    theme_minimal()
+}
+```
+
+## ClinVar unique vs Biobank
+
+```{r}
+auc_plot(results3, "AUC — ClinVar (likely) pathogenic vs Biobank")
+```
+
+## ClinVar long vs Biobank
+
+```{r}
+auc_plot(results_long_3, "AUC — ClinVar all vs Biobank")
+```
+
+## DNM long vs Biobank
+
+```{r}
+auc_plot(results_DNM3, "AUC — DNM vs Biobank")
+```
+
+# Export plot data
+
+```{r}
+write_csv(results3,
+          "../../Data/MAVE_benchmarking/PTEN_MAVE_plot_data_clinvar_unique_published_data.csv")
+write_csv(results_long_3,
+          "../../Data/MAVE_benchmarking/PTEN_MAVE_plot_data_clinvar_long_published_data.csv")
+write_csv(results_DNM3,
+          "../../Data/MAVE_benchmarking/PTEN_MAVE_plot_data_DNM_long_published_data.csv")
+```

@@ -1,0 +1,141 @@
+---
+title: "Annotate with clean NumberSubmitters"
+output:
+  html_document:
+    df_print: paged
+    code_folding: hide
+---
+
+# Aim
+
+The `NumberSubmitters` column in the ClinVar variant files counts all submissions regardless of origin (germline and somatic). This script replaces it with a germline-only count (`NumberSubmitters_clean`) derived from the ClinVar submission summary, using a regex filter on the `OriginCounts` field.
+
+This corrected count is used downstream in `Data_prep_gene_groups.Rmd` to weight variant representation in the long-form training data.
+
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+theme_set(theme_bw(14))
+```
+
+# Load ClinVar submission summary and compute germline counts
+
+```{r, message=FALSE, warning=FALSE}
+cols <- c(
+  "VariationID", "ClinicalSignificance", "DateLastEvaluated", "Description",
+  "SubmittedPhenotypeInfo", "ReportedPhenotypeInfo", "ReviewStatus",
+  "CollectionMethod", "OriginCounts", "Submitter", "SCV",
+  "SubmittedGeneSymbol", "ExplanationOfInterpretation",
+  "SomaticClinicalImpact", "Oncogenicity", "ContributesToAggregateClassification"
+)
+
+clinvar_subs <- read_tsv(
+  "../../Data/Clinvar_060225/submission_summary_2025-02_noheader.txt",
+  col_names = cols
+)
+
+# Count germline submissions per variant (germline, de novo, parental, inherited)
+germline_counts <- clinvar_subs %>%
+  filter(grepl("germline|de novo|paternal|maternal|inherited", OriginCounts)) %>%
+  count(VariationID, name = "NumberSubmitters_clean")
+```
+
+# Helper functions
+
+```{r}
+# Load VariationID lookup for a given pathogenicity class
+load_variation_ids <- function(path) {
+  read_tsv(path, show_col_types = FALSE) %>%
+    mutate(variant = paste(Chromosome, PositionVCF, ReferenceAlleleVCF, AlternateAlleleVCF, sep = "_")) %>%
+    dplyr::select(variant, VariationID)
+}
+
+# Add VariationID, join germline counts, rename NumberSubmitters columns
+add_clean_nsub <- function(df, id_lookup) {
+  df %>%
+    mutate(
+      Chromosome = str_remove(chrom, "^chr"),
+      variant    = paste(Chromosome, pos, ref, alt, sep = "_")
+    ) %>%
+    left_join(id_lookup, by = "variant") %>%
+    left_join(germline_counts, by = "VariationID") %>%
+    dplyr::select(-Chromosome, -variant, -VariationID) %>%
+    dplyr::rename(NumberSubmitters_old = NumberSubmitters)
+}
+```
+
+# Process pathogenic variants
+
+```{r, message=FALSE, warning=FALSE}
+clinvar_path <- read_tsv(
+  "../../Data/Variant_lists/Clinvar_DDG2P_missense_path_annot_240426_public.tsv.gz"
+)
+
+path_ids <- load_variation_ids(
+  "../../Data/Clinvar_060225/Clinvar_build_38_DDG2P_germline_path_missense.tsv.gz"
+)
+
+clinvar_path_clean <- add_clean_nsub(clinvar_path, path_ids)
+```
+
+# Process benign variants
+
+```{r, message=FALSE, warning=FALSE}
+clinvar_benign <- read_tsv(
+  "../../Data/Variant_lists/Clinvar_DDG2P_missense_benign_annot_240426_public.tsv.gz"
+)
+
+benign_ids <- load_variation_ids(
+  "../../Data/Clinvar_060225/Clinvar_build_38_DDG2P_germline_benign_missense.tsv.gz"
+)
+
+clinvar_benign_clean <- add_clean_nsub(clinvar_benign, benign_ids)
+```
+
+# Process VUS variants
+
+```{r, message=FALSE, warning=FALSE}
+clinvar_VUS <- read_tsv(
+  "../../Data/Variant_lists/Clinvar_DDG2P_missense_VUS_annot_240426_public.tsv.gz"
+)
+
+VUS_ids <- load_variation_ids(
+  "../../Data/Clinvar_060225/Clinvar_build_38_DDG2P_germline_VUS_conflicting_missense.tsv.gz"
+)
+
+clinvar_VUS_clean <- add_clean_nsub(clinvar_VUS, VUS_ids)
+```
+
+# Diagnostic: correlation between old and new NumberSubmitters
+
+Expected: variants with somatic-dominated classifications (BRAF V600E, PIK3CA H1047R) drift downwards; genuine germline-only variants remain unchanged.
+
+```{r}
+clinvar_path_clean %>%
+  mutate(
+    name = paste(gene, codon_change),
+    diff = NumberSubmitters_old - NumberSubmitters_clean
+  ) %>%
+  ggplot(aes(x = NumberSubmitters_old, y = NumberSubmitters_clean)) +
+  geom_point(alpha = 0.4) +
+  ggrepel::geom_text_repel(
+    data = . %>% filter(diff > 10),
+    aes(label = name),
+    size = 3,
+    max.overlaps = Inf
+  ) +
+  labs(
+    x = "NumberSubmitters (original — germline + somatic)",
+    y = "NumberSubmitters (clean — germline only)",
+    title = "Pathogenic variants: old vs. clean NumberSubmitters"
+  )
+```
+
+Note: a small number of variants (e.g. BRAF V600E) retain non-zero germline submission counts after filtering. Inspection of these entries suggests they represent high-level mosaic events or imprecise origin labelling in ClinVar; they cannot be reliably removed without manual curation.
+
+# Export
+
+```{r}
+write_tsv(clinvar_path_clean,  "../../Data/Variant_lists/Clinvar_DDG2P_missense_path_annot_240426_public.tsv.gz")
+write_tsv(clinvar_benign_clean, "../../Data/Variant_lists/Clinvar_DDG2P_missense_benign_annot_240426_public.tsv.gz")
+write_tsv(clinvar_VUS_clean,    "../../Data/Variant_lists/Clinvar_DDG2P_missense_VUS_annot_240426_public.tsv.gz")
+```

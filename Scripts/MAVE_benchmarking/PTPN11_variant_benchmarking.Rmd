@@ -1,0 +1,581 @@
+---
+title: "PTPN11 variant benchmarking: public data"
+output:
+  html_document:
+    df_print: paged
+    code_folding: hide
+  pdf_document: default
+date: "2026-01-15"
+---
+
+# Aim
+
+Determine the relative utility of MAVE data, somatic data and CEPs for clinical variant
+interpretation in PTPN11 using publicly available data (TwinsUK sperm sequencing and 31k
+DNM cohort).
+
+```{r, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(DT)
+library(janitor)
+library(patchwork)
+library(pROC)
+library(cowplot)
+
+dir.create("../../Data/MAVE_benchmarking", recursive = TRUE, showWarnings = FALSE)
+dir.create("../../Data/Figures/Final",     recursive = TRUE, showWarnings = FALSE)
+
+palette1 <- c("#FF8080", "#804000", "#6699CC")
+
+read_ptpn11 <- function(path) {
+  read_tsv(path, show_col_types = FALSE) %>%
+    filter(gene == "PTPN11") %>%
+    dplyr::rename(
+      n_sperm             = n_sperm_twinsUK,
+      n_sperm_codon_count = n_sperm_twinsUK_codon_count
+    )
+}
+```
+
+```{r, warning=FALSE, message=FALSE}
+# Three-letter to one-letter amino acid map
+aa3to1 <- c(
+  Ala = "A", Arg = "R", Asn = "N", Asp = "D", Cys = "C",
+  Glu = "E", Gln = "Q", Gly = "G", His = "H", Ile = "I",
+  Leu = "L", Lys = "K", Met = "M", Phe = "F", Pro = "P",
+  Ser = "S", Thr = "T", Trp = "W", Tyr = "Y", Val = "V"
+)
+
+vcep <- read_csv(
+  "../../Data/RASopathy_VCEP/RASopathy_expert_var_curation.csv",
+  show_col_types = FALSE
+) %>%
+  mutate(
+    gene = str_extract(`Preferred Variant Title`, "(?<=\\()[A-Z0-9]+(?=\\))"),
+    mutation = `Preferred Variant Title` %>%
+      str_extract("\\(p\\.[^)]+\\)") %>%
+      str_remove_all("\\(|\\)") %>%
+      str_remove("^p\\.") %>%
+      str_replace("([A-Za-z]{3})(\\d+)([A-Za-z]{3})", "\\2\\1>\\2\\3") %>%
+      str_replace_all(aa3to1)
+  )
+
+vcep_path   <- vcep %>% filter(Classification %in% c("Pathogenic", "Likely pathogenic"))
+vcep_benign <- vcep %>% filter(Classification %in% c("Benign", "Likely Benign"))
+vcep_vus    <- vcep %>% filter(Classification == "Uncertain Significance")
+
+PTPN11_MAVE_FL <- read_csv(
+  "../../Data/MAVE/PTPN11_MAVE_Jiang_2025/PTPN11_MAVE_SHP2_FL_41467_2025_60641_MOESM8_ESM.csv",
+  show_col_types = FALSE
+) %>%
+  clean_names() %>%
+  dplyr::select(wt, pos, mut, enrichment_ave, cancer_high_freq) %>%
+  mutate(codon_change = paste0(pos, wt, ">", pos, mut))
+
+PTPN11_MAVE_PTP <- read_csv(
+  "../../Data/MAVE/PTPN11_MAVE_Jiang_2025/PTPN11_MAVE_SHP2_PTP_41467_2025_60641_MOESM8_ESM.csv",
+  show_col_types = FALSE
+) %>%
+  clean_names() %>%
+  dplyr::select(wt, pos, mut, enrichment_ave) %>%
+  mutate(codon_change = paste0(pos, wt, ">", pos, mut))
+
+DNMs_31k <- read_tsv(
+  "../../Data/Variant_lists/DNMs_31k_missense_annot_240426_public.tsv.gz",
+  show_col_types = FALSE
+)
+
+clinvar_raw <- read_tsv(
+  "../../Data/Clinvar_060225/Clinvar_build_38_DDG2P_germline.tsv.gz",
+  show_col_types = FALSE
+)
+```
+
+```{r, warning=FALSE, message=FALSE}
+Clinvar_filt_path   <- read_ptpn11("../../Data/Variant_lists/Clinvar_DDG2P_missense_path_annot_240426_public.tsv.gz")
+Clinvar_filt_vus    <- read_ptpn11("../../Data/Variant_lists/Clinvar_DDG2P_missense_VUS_annot_240426_public.tsv.gz")
+Clinvar_filt_benign <- read_ptpn11("../../Data/Variant_lists/Clinvar_DDG2P_missense_benign_annot_240426_public.tsv.gz")
+Biobank_benign      <- read_ptpn11("../../Data/Variant_lists/Biobank_missense_variants_annot_240426_public.tsv.gz")
+```
+
+# Defining NSML (LOF) vs Noonan (GOF) variants
+
+NSML/LEOPARD mutations from https://doi.org/10.1159/000342251:
+
+```{r}
+NSML_mutations <- c(
+  "279Y>279C", "279Y>279S", "461A>461T", "464G>464A",
+  "468T>468M", "468T>468P", "498R>498W", "498R>498L",
+  "506Q>506P", "510Q>510E", "510Q>510P"
+)
+
+Noonan_mutations <- vcep %>%
+  filter(gene == "PTPN11",
+         Classification %in% c("Pathogenic", "Likely Pathogenic"),
+         Condition %in% c("Noonan syndrome", "RASopathy"),
+         !is.na(mutation),
+         !mutation %in% c("510Q>510P", "279Y>279C")) %>%
+  pull(mutation)
+```
+
+## MAVE scores by pathogenicity category
+
+```{r}
+plot_clinvar <- bind_rows(
+  Clinvar_filt_path   %>% dplyr::select(chrom, pos, ref, alt, NumberSubmitters_clean, codon_change) %>% mutate(category = "(likely)Pathogenic"),
+  Clinvar_filt_vus    %>% dplyr::select(chrom, pos, ref, alt, NumberSubmitters_clean, codon_change) %>% mutate(category = "VUS/conflicting"),
+  Clinvar_filt_benign %>% dplyr::select(chrom, pos, ref, alt, NumberSubmitters_clean, codon_change) %>% mutate(category = "(likely)Benign"),
+  Biobank_benign      %>% dplyr::select(chrom, pos, ref, alt, codon_change)                  %>% mutate(category = "UK_Biobank")
+) %>%
+  left_join(PTPN11_MAVE_FL %>% dplyr::select(codon_change, enrichment_ave), by = "codon_change") %>%
+  mutate(NSML_mutation = if_else(codon_change %in% NSML_mutations, "Yes", "No"),
+         category = factor(category, levels = c("(likely)Pathogenic", "VUS/conflicting",
+                                                 "(likely)Benign", "UK_Biobank")))
+
+plot_vcep <- bind_rows(
+  data.frame(codon_change = vcep_path  %>% filter(gene == "PTPN11") %>% pull(mutation), category = "(likely)Pathogenic"),
+  data.frame(codon_change = vcep_vus   %>% filter(gene == "PTPN11") %>% pull(mutation), category = "VUS"),
+  data.frame(codon_change = vcep_benign %>% filter(gene == "PTPN11") %>% pull(mutation), category = "(likely)Benign"),
+  Biobank_benign %>% dplyr::select(chrom, pos, ref, alt, codon_change) %>% mutate(category = "UK_Biobank")
+) %>%
+  left_join(PTPN11_MAVE_FL %>% dplyr::select(codon_change, enrichment_ave), by = "codon_change") %>%
+  mutate(NSML_mutation = if_else(codon_change %in% NSML_mutations, "Yes", "No"),
+         category = factor(category, levels = c("(likely)Pathogenic", "VUS", "(likely)Benign", "UK_Biobank")))
+
+plot_DNMs <- bind_rows(
+  DNMs_31k %>%
+    filter(grepl("missense", consequence), gene == "PTPN11") %>%
+    dplyr::select(chrom, pos, ref, alt, n_DNM, codon_change) %>%
+    mutate(category = "DNMs"),
+  Biobank_benign %>%
+    dplyr::select(chrom, pos, ref, alt, codon_change) %>%
+    mutate(category = "UK_Biobank")
+) %>%
+  left_join(PTPN11_MAVE_FL %>% dplyr::select(codon_change, enrichment_ave), by = "codon_change") %>%
+  mutate(NSML_mutation = if_else(codon_change %in% NSML_mutations, "Yes", "No"),
+         category = factor(category, levels = c("DNMs", "UK_Biobank")))
+```
+
+### MAVE coverage
+
+#### ClinVar and Biobank variants
+
+```{r}
+plot_clinvar %>%
+  group_by(category) %>%
+  summarise(n = n(), n_with_MAVE = sum(!is.na(enrichment_ave)),
+            percent_with_MAVE = n_with_MAVE / n * 100)
+```
+
+#### VCEP variants
+
+```{r}
+plot_vcep %>%
+  group_by(category) %>%
+  summarise(n = n(), n_with_MAVE = sum(!is.na(enrichment_ave)),
+            percent_with_MAVE = n_with_MAVE / n * 100)
+```
+
+#### DNM variants
+
+```{r}
+plot_DNMs %>%
+  group_by(category) %>%
+  summarise(n = n(), n_with_MAVE = sum(!is.na(enrichment_ave)),
+            percent_with_MAVE = n_with_MAVE / n * 100)
+```
+
+### ClinVar vs Biobank
+
+```{r}
+plot_clinvar %>% filter(!is.na(enrichment_ave)) %>%
+  ggplot(aes(x = category, y = enrichment_ave)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(width = 0.2, alpha = 0.7, aes(color = NSML_mutation)) +
+  theme_minimal() +
+  labs(title = "PTPN11 MAVE enrichment scores by ClinVar pathogenicity",
+       x = "", y = "MAVE enrichment score (full length)")
+```
+
+### VCEP vs Biobank
+
+```{r}
+plot_vcep %>% filter(!is.na(enrichment_ave)) %>%
+  ggplot(aes(x = category, y = enrichment_ave)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(width = 0.2, alpha = 0.7, aes(color = NSML_mutation)) +
+  theme_minimal() +
+  labs(title = "PTPN11 MAVE enrichment scores by VCEP pathogenicity",
+       x = "", y = "MAVE enrichment score (full length)")
+```
+
+### DNMs vs Biobank
+
+```{r}
+plot_DNMs %>% filter(!is.na(enrichment_ave)) %>%
+  ggplot(aes(x = category, y = enrichment_ave)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(width = 0.2, alpha = 0.7, aes(color = NSML_mutation)) +
+  theme_minimal() +
+  labs(title = "PTPN11 MAVE enrichment scores: DNMs vs Biobank",
+       x = "", y = "MAVE enrichment score (full length)")
+```
+
+## AUC to distinguish ClinVar pathogenic PTPN11 variants from Biobank variants
+
+Three variant set definitions:
+1. All ClinVar (likely) pathogenic vs Biobank
+2. Stringent: ClinVar Pathogenic / VCEP pathogenic vs (likely) benign + common Biobank (AF > 5e-6)
+3. Stringent subset minus NSML mutations
+
+```{r auc-helper}
+predictors <- c("AlphaMissense_score", "REVEL_score", "popEVE",
+                "CADD_raw", "PrimateAI_score",
+                "n_COSMIC", "n_COSMIC_codon_count",
+                "n_sperm", "n_sperm_codon_count",
+                "enrichment_ave")
+
+calc_roc_df <- function(df) {
+  results <- data.frame()
+  for (predictor in predictors) {
+    df_noNA <- df %>% filter(!is.na(.data[[predictor]]))
+    if (nrow(df_noNA) < 2 || n_distinct(df_noNA$label) < 2) next
+    roc_obj <- roc(df_noNA$label, df_noNA[[predictor]], quiet = TRUE)
+    ci_val <- ci.auc(roc_obj)
+    results <- rbind(results, data.frame(
+      Predictor = predictor,
+      AUC      = as.numeric(auc(roc_obj)),
+      CI_upper = round(ci_val[3], 4),
+      CI_lower = round(ci_val[1], 4)
+    ))
+  }
+  results
+}
+
+prep_roc <- function(df, path_level, benign_levels) {
+  df %>%
+    mutate(label = case_when(
+      category == path_level                ~ 1,
+      category %in% benign_levels           ~ 0,
+      TRUE                                  ~ NA_real_
+    )) %>%
+    filter(!is.na(label)) %>%
+    left_join(PTPN11_MAVE_FL %>% dplyr::select(codon_change, enrichment_ave),
+              by = "codon_change") %>%
+    mutate(NSML_mutation = if_else(codon_change %in% NSML_mutations, "Yes", "No"),
+           label = factor(label, levels = c(0, 1))) %>%
+    filter(!is.na(enrichment_ave)) %>%
+    mutate(across(all_of(predictors), as.numeric))
+}
+```
+
+```{r compute-aucs, warning=FALSE}
+roc_df_base <- bind_rows(
+  Clinvar_filt_path %>%
+    dplyr::select(chrom, pos, ref, alt, codon_change, all_of(setdiff(predictors, "enrichment_ave"))) %>%
+    mutate(category = "(likely)Pathogenic"),
+  Biobank_benign %>%
+    dplyr::select(chrom, pos, ref, alt, codon_change, all_of(setdiff(predictors, "enrichment_ave"))) %>%
+    mutate(category = "UK_Biobank")
+)
+
+roc_clinvar       <- prep_roc(roc_df_base, "(likely)Pathogenic", "UK_Biobank")
+roc_clinvar_no_NSML <- roc_clinvar %>% filter(NSML_mutation == "No")
+
+Clinvar_path_stringent_ids <- clinvar_raw %>%
+  filter(GeneSymbol == "PTPN11", ClinicalSignificance == "Pathogenic") %>%
+  mutate(variant = paste0("chr", Chromosome, "_", PositionVCF, "_",
+                          ReferenceAlleleVCF, "_", AlternateAlleleVCF)) %>%
+  pull(variant)
+
+roc_df_stringent <- bind_rows(
+  Clinvar_filt_path %>%
+    mutate(variant = paste(chrom, pos, ref, alt, sep = "_")) %>%
+    filter(variant %in% Clinvar_path_stringent_ids) %>%
+    dplyr::select(chrom, pos, ref, alt, codon_change,
+                  all_of(setdiff(predictors, "enrichment_ave"))) %>%
+    mutate(category = "Pathogenic"),
+  Clinvar_filt_benign %>%
+    dplyr::select(chrom, pos, ref, alt, codon_change,
+                  all_of(setdiff(predictors, "enrichment_ave"))) %>%
+    mutate(category = "(likely)Benign"),
+  Biobank_benign %>%
+    filter(AF > 0.000005) %>%
+    dplyr::select(chrom, pos, ref, alt, codon_change,
+                  all_of(setdiff(predictors, "enrichment_ave"))) %>%
+    mutate(category = "UK_Biobank")
+)
+
+roc_clinvar_stringent        <- prep_roc(roc_df_stringent, "Pathogenic", c("(likely)Benign", "UK_Biobank"))
+roc_clinvar_stringent_no_NSML <- roc_clinvar_stringent %>% filter(NSML_mutation == "No")
+
+roc_results            <- calc_roc_df(roc_clinvar)
+roc_results_no_NSML    <- calc_roc_df(roc_clinvar_no_NSML)
+roc_results_stringent  <- calc_roc_df(roc_clinvar_stringent)
+roc_results_stringent_no_NSML <- calc_roc_df(roc_clinvar_stringent_no_NSML)
+```
+
+```{r, fig.width=10, fig.height=4}
+plot_dat <- bind_rows(
+  roc_results_stringent_no_NSML %>% mutate(Dataset = "Stringent subset minus NSML"),
+  roc_results_stringent          %>% mutate(Dataset = "Stringent subset"),
+  roc_results                    %>% mutate(Dataset = "All variants")
+)
+
+plot_dat %>%
+  mutate(fill_factor = case_when(
+    Predictor %in% c("n_COSMIC", "n_COSMIC_codon_count",
+                     "n_sperm", "n_sperm_codon_count") ~ "Somatic data",
+    Predictor == "enrichment_ave"                       ~ "Functional data (MAVE)",
+    TRUE ~ "Computational predictors"
+  )) %>%
+  mutate(Predictor = factor(Predictor, levels = predictors)) %>%
+  ggplot(aes(x = Predictor, y = AUC, color = fill_factor, shape = Dataset)) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = CI_lower, ymax = CI_upper), width = 0.2,
+                position = position_dodge(width = 0.5)) +
+  coord_flip() +
+  theme_minimal() +
+  labs(title = "AUC: ClinVar pathogenic PTPN11 variants vs Biobank",
+       x = "", y = "AUC") +
+  ylim(0, 1) +
+  theme(legend.title = element_blank()) +
+  scale_color_manual(values = c("Somatic data" = "#6699CC",
+                                "Functional data (MAVE)" = "#804000",
+                                "Computational predictors" = "#FF8080"))
+```
+
+### Unique vs long form
+
+```{r, warning=FALSE}
+roc_clinvar_long <- bind_rows(
+  Clinvar_filt_path %>%
+    dplyr::select(chrom, pos, ref, alt, codon_change,
+                  all_of(setdiff(predictors, "enrichment_ave")),
+                  NumberSubmitters_clean) %>%
+    mutate(NumberSubmitters_clean = coalesce(NumberSubmitters_clean, 1L)) %>%
+    uncount(NumberSubmitters_clean) %>%
+    mutate(category = "(likely)Pathogenic"),
+  Biobank_benign %>%
+    dplyr::select(chrom, pos, ref, alt, codon_change,
+                  all_of(setdiff(predictors, "enrichment_ave"))) %>%
+    mutate(category = "UK_Biobank")
+) %>%
+  mutate(label = case_when(
+    category == "(likely)Pathogenic" ~ 1,
+    category == "UK_Biobank"         ~ 0,
+    TRUE ~ NA_real_
+  )) %>%
+  filter(!is.na(label)) %>%
+  left_join(PTPN11_MAVE_FL %>% dplyr::select(codon_change, enrichment_ave), by = "codon_change") %>%
+  mutate(NSML_mutation = if_else(codon_change %in% NSML_mutations, "Yes", "No"),
+         label = factor(label, levels = c(0, 1))) %>%
+  filter(!is.na(enrichment_ave)) %>%
+  mutate(across(all_of(predictors), as.numeric))
+
+roc_results_long <- calc_roc_df(roc_clinvar_long)
+```
+
+```{r, fig.width=10, fig.height=5}
+unique_vs_long <- bind_rows(
+  roc_results      %>% mutate(Form = "Unique"),
+  roc_results_long %>% mutate(Form = "Long")
+)
+
+unique_vs_long %>%
+  mutate(fill_factor = case_when(
+    Predictor %in% c("n_COSMIC", "n_COSMIC_codon_count",
+                     "n_sperm", "n_sperm_codon_count") ~ "Somatic data",
+    Predictor == "enrichment_ave"                       ~ "Functional data (MAVE)",
+    TRUE ~ "Computational predictors"
+  )) %>%
+  mutate(Predictor = factor(Predictor, levels = predictors)) %>%
+  ggplot(aes(x = Predictor, y = AUC, color = fill_factor)) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = CI_lower, ymax = CI_upper), width = 0.2,
+                position = position_dodge(width = 0.5)) +
+  coord_flip() + facet_wrap(~ Form) +
+  theme_minimal() +
+  labs(title = "AUC: ClinVar pathogenic PTPN11 variants vs Biobank — unique vs long form",
+       x = "", y = "AUC") +
+  ylim(0, 1) +
+  theme(legend.title = element_blank()) +
+  scale_color_manual(values = c("Somatic data" = "#6699CC",
+                                "Functional data (MAVE)" = "#804000",
+                                "Computational predictors" = "#FF8080"))
+```
+
+# Write out data
+
+```{r}
+write_csv(plot_dat,
+          "../../Data/MAVE_benchmarking/PTPN11_MAVE_plot_dat_public_data.csv")
+write_csv(unique_vs_long,
+          "../../Data/MAVE_benchmarking/PTPN11_MAVE_plot_dat_unique_long_public_data.csv")
+```
+
+# Appendix: Codon-level mutation distribution and MAVE scores
+
+```{r appendix-data, message=FALSE, warning=FALSE}
+# DATA_SOURCE: pre-processed per-codon mutation count files (from annotation pipeline)
+# Expected paths when available:
+#   Data/Clinvar_060225/Clinvar_path_DDG2P_codingcsq_for_gene_vis.tsv.gz
+#   Data/Cancer_data/COSMIC_DDG2P_for_gene_vis.tsv.gz  (cluster resource)
+#   Data/Variant_lists/DNM_list_for_gene_vis.tsv.gz
+#   Data/Variant_lists/Sperm_seq_for_gene_vis.tsv.gz
+#   Data/MAVE/PTPN11_MAVE_Jiang_2025/PTPN11_MAVE_FL_for_gene_vis.tsv.gz
+
+appendix_ok <- tryCatch({
+  clinvar_vis <<- readr::read_tsv(
+    "../../Data/Clinvar_060225/Clinvar_path_DDG2P_codingcsq_for_gene_vis.tsv.gz",
+    show_col_types = FALSE
+  )
+  COSMIC_vis <<- readr::read_tsv(
+    "../../Data/Cancer_data/COSMIC_DDG2P_for_gene_vis.tsv.gz",
+    show_col_types = FALSE
+  )
+  DNMs_vis <<- readr::read_tsv(
+    "../../Data/Variant_lists/DNM_list_for_gene_vis.tsv.gz",
+    show_col_types = FALSE
+  )
+  sperm_vis <<- readr::read_tsv(
+    "../../Data/Variant_lists/Sperm_seq_for_gene_vis.tsv.gz",
+    show_col_types = FALSE
+  )
+  MAVE_vis <<- readr::read_tsv(
+    "../../Data/MAVE/PTPN11_MAVE_Jiang_2025/PTPN11_MAVE_FL_for_gene_vis.tsv.gz",
+    show_col_types = FALSE
+  )
+  TRUE
+}, error = function(e) {
+  message("Appendix data not available locally — skipping appendix plots: ", conditionMessage(e))
+  FALSE
+})
+
+missense_colors <- c("missense" = "#882255", "non_missense" = "#6699CC")
+aa_levels <- c("A","R","N","D","C","Q","E","G","H","I",
+               "L","K","M","F","P","S","T","W","Y","V","stop")
+```
+
+```{r appendix-helpers}
+xaxis_codons <- function(max_codon) {
+  if (is.na(max_codon) || !is.finite(max_codon) || max_codon <= 0) max_codon <- 1
+  if (max_codon <= 600) {
+    scale_x_continuous(limits = c(0, max_codon + 20),  breaks = seq(0, max_codon + 20,  by = 100))
+  } else if (max_codon <= 1200) {
+    scale_x_continuous(limits = c(0, max_codon + 50),  breaks = seq(0, max_codon + 50,  by = 250))
+  } else {
+    scale_x_continuous(limits = c(0, max_codon + 100), breaks = pretty(c(0, max_codon)))
+  }
+}
+
+left_labeled_panel <- function(p, label, strip_width = 0.26, label_size = 0.9) {
+  strip <- wrap_elements(
+    full = grid::textGrob(label, rot = 0, x = unit(0.02, "npc"),
+                          just = c("left", "centre"),
+                          gp = grid::gpar(fontface = "bold", cex = label_size))
+  )
+  (strip | p) + plot_layout(widths = c(strip_width, 1))
+}
+
+mave_heatmap_plot <- function(MAVE_gene, max_codon) {
+  mave_df <- MAVE_gene %>%
+    transmute(codon = pos,
+              mut   = factor(mut, levels = rev(aa_levels)),
+              enrichment_ave) %>%
+    tidyr::complete(codon = seq_len(max_codon),
+                    mut   = factor(rev(aa_levels), levels = rev(aa_levels)))
+  lim <- max(abs(mave_df$enrichment_ave), na.rm = TRUE)
+  if (!is.finite(lim) || lim == 0) lim <- 1
+
+  ggplot(mave_df, aes(x = codon, y = mut, fill = enrichment_ave)) +
+    geom_tile(height = 0.95, width = 0.95) +
+    xlab("Codon") + ylab(NULL) +
+    xaxis_codons(max_codon) +
+    scale_fill_gradient2(low = "#2166AC", mid = "white", high = "#B2182B",
+                         midpoint = 0, limits = c(-lim, lim), na.value = "grey80",
+                         name = "MAVE") +
+    theme_bw() +
+    theme(panel.grid = element_blank(), axis.text.y = element_blank(),
+          axis.ticks.y = element_blank(), axis.title.y = element_blank(),
+          legend.position = "right")
+}
+
+generate_gene_panel_plots <- function(gene_symbol, clinvar, COSMIC, DNMs, sperm, MAVE,
+                                      panel_labels = c("left", "none")) {
+  panel_labels <- match.arg(panel_labels)
+  clinvar_g <- clinvar %>% filter(gene == gene_symbol)
+  COSMIC_g  <- COSMIC  %>% filter(gene == gene_symbol)
+  DNMs_g    <- DNMs    %>% filter(gene == gene_symbol)
+  sperm_g   <- sperm   %>% filter(gene == gene_symbol)
+
+  max_codon <- suppressWarnings(max(c(
+    if (nrow(clinvar_g) > 0) max(clinvar_g$codon, na.rm = TRUE) else -Inf,
+    if (nrow(COSMIC_g)  > 0) max(COSMIC_g$codon,  na.rm = TRUE) else -Inf,
+    if (nrow(DNMs_g)    > 0) max(DNMs_g$codon,    na.rm = TRUE) else -Inf,
+    if (nrow(sperm_g)   > 0) max(sperm_g$codon,   na.rm = TRUE) else -Inf,
+    if (nrow(MAVE)      > 0) max(MAVE$pos,         na.rm = TRUE) else -Inf
+  ), na.rm = TRUE))
+  if (!is.finite(max_codon) || max_codon <= 0) max_codon <- 1
+
+  base_theme <- theme(plot.title = element_blank(), legend.position = "none",
+                      axis.title.y = element_blank())
+
+  make_bar_panel <- function(dat, y_col) {
+    dat %>%
+      mutate(missense = factor(missense, levels = c("missense", "non_missense"))) %>%
+      ggplot(aes(x = codon, y = .data[[y_col]], fill = missense, colour = missense)) +
+      geom_col(width = 1, linewidth = 0.25, na.rm = TRUE) + xlab("") +
+      xaxis_codons(max_codon) +
+      scale_fill_manual(values = missense_colors, breaks = c("missense", "non_missense"), drop = FALSE) +
+      scale_colour_manual(values = missense_colors, breaks = c("missense", "non_missense"),
+                          drop = FALSE, guide = "none") +
+      base_theme
+  }
+
+  clinvar_plot <- make_bar_panel(clinvar_g, "NumberSubmitters_clean")
+  dnm_plot     <- make_bar_panel(DNMs_g,   "n_DNM")
+  cosmic_plot  <- make_bar_panel(COSMIC_g, "n_COSMIC")
+  sperm_plot   <- make_bar_panel(sperm_g,  "n_sperm")
+  MAVE_plot    <- mave_heatmap_plot(MAVE, max_codon) +
+    theme(plot.margin = margin(5.5, 5.5, 5.5, 18))
+
+  labels <- c("n ClinVar P/LP", "n DNM", "n COSMIC", "n Sperm nanoseq", "MAVE")
+
+  if (panel_labels == "left") {
+    combined <-
+      left_labeled_panel(clinvar_plot, labels[1]) /
+      left_labeled_panel(dnm_plot,     labels[2]) /
+      left_labeled_panel(cosmic_plot,  labels[3]) /
+      left_labeled_panel(sperm_plot,   labels[4]) /
+      left_labeled_panel(MAVE_plot,    labels[5]) +
+      plot_layout(heights = c(1, 1, 1, 1, 1.3))
+  } else {
+    combined <- clinvar_plot / dnm_plot / cosmic_plot / sperm_plot / MAVE_plot +
+      plot_layout(heights = c(1, 1, 1, 1, 1.3))
+  }
+
+  gene_title <- wrap_elements(
+    full = grid::textGrob(gene_symbol, x = unit(0, "npc"), just = c("left", "top"),
+                          gp = grid::gpar(fontface = "bold", cex = 1.25))
+  )
+  gene_title / combined + plot_layout(heights = c(0.08, 1))
+}
+```
+
+```{r ptpn11-codon-plot, fig.width=8, fig.height=8, warning=FALSE, eval=appendix_ok}
+PTPN11_panel <- generate_gene_panel_plots(
+  gene_symbol  = "PTPN11",
+  clinvar      = clinvar_vis,
+  COSMIC       = COSMIC_vis,
+  DNMs         = DNMs_vis,
+  sperm        = sperm_vis,
+  MAVE         = PTPN11_MAVE_FL,
+  panel_labels = "left"
+)
+
+PTPN11_panel
+
+ggsave("../../Data/Figures/Final/PTPN11_MAVE_codon_plot.png",
+       PTPN11_panel, width = 8, height = 8, dpi = 300)
+```

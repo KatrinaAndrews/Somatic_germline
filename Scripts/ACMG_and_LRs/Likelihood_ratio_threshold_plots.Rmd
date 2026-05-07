@@ -1,0 +1,503 @@
+---
+title: "Likelihood ratio threshold plots"
+output:
+  html_document:
+    df_print: paged
+    code_folding: hide
+  pdf_document: default
+date: "2026-02-27"
+---
+
+# Aim
+
+Examine the LRs of different somatic features across:
+
+* gene groups
+* pathogenic variant sources (clinvar vs DNMs)
+* long vs unique form data
+
+```{r, message=FALSE}
+library(tidyverse)
+library(patchwork)
+library(ggrepel)
+
+theme_set(theme_bw(14))
+
+safe_colorblind_palette <- c("#88CCEE", "#CC6677", "#117733", "#DDCC77", "#332288", "#AA4499",
+                             "#44AA99", "#999933", "#882255", "#661100", "#6699CC", "#888888")
+
+dir.create("../../Data/Figures", recursive = TRUE, showWarnings = FALSE)
+```
+
+```{r, message=FALSE}
+LR <- read_csv("../../Data/LR_calculations/LR_table.csv")
+```
+
+```{r}
+acmg_lr_pos <- tibble::tibble(
+  level = c("Supporting", "Moderate", "Strong"),
+  lr = c(2.08, 4.33, 18.7)
+)
+
+acmg_lr_neg <- tibble::tibble(
+  level = c("Supporting", "Moderate", "Strong"),
+  lr = c(0.48, 0.23, 0.05)
+)
+```
+
+```{r}
+LR_edit <- LR %>%
+  mutate(gene_group = case_when(
+    gene_group == "AltFunc"          ~ "Altered function genes",
+    gene_group == "RASopathies"      ~ "RASopathy genes",
+    gene_group == "AltFunc_minus_RAS"~ "Non-RASopathy Altered function genes",
+    gene_group == "LOF"              ~ "Loss of function genes",
+    gene_group == "Other"            ~ "Other dominant cancer-DD genes",
+    gene_group == "AllGenes"         ~ "All DD genes",
+    gene_group == "MacrocephalyGenes"~ "Macrocephaly genes"
+  ))
+```
+
+
+# All gene groups, single features
+
+## Clinvar unique with twinsUK sperm data {.tabset}
+
+### COSMIC codon count
+
+```{r, fig.width=9, fig.height=5}
+LR_edit %>%
+  filter(data_set == "clinvar_unique_public") %>%
+  filter(!threshold == "1-4") %>%
+  dplyr::filter(feature == "n_COSMIC_codon_count") %>%
+  dplyr::arrange(gene_group, sensitivity) %>%
+  ggplot(aes(x = sensitivity, y = LR_pos, colour = gene_group, group = gene_group)) +
+
+  geom_errorbar(
+    aes(ymin = LR_pos_low95, ymax = LR_pos_high95),
+    width = 0.005,
+    linewidth = 0.4,
+    alpha = 0.7
+  ) +
+
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 1.5) +
+
+  geom_hline(
+    data = acmg_lr_pos,
+    aes(yintercept = lr),
+    linetype = "dotted",
+    colour = "grey40",
+    linewidth = 0.5,
+    inherit.aes = FALSE
+  ) +
+
+  geom_text(
+    data = acmg_lr_pos,
+    aes(x = 1.1, y = lr, label = level),
+    hjust = 1.05, vjust = -0.1,
+    colour = "grey40",
+    size = 3,
+    inherit.aes = FALSE
+  ) +
+
+  geom_text_repel(
+    data = ~ dplyr::filter(.x, gene_group == "RASopathy genes"),
+    aes(label = threshold),
+    size = 3,
+    show.legend = FALSE
+  ) +
+
+  scale_y_log10() +
+  coord_cartesian(clip = "off") +
+  labs(y = "Positive likelihood ratio") +
+  scale_colour_manual(values = safe_colorblind_palette) +
+  theme_bw() +
+  theme(plot.margin = margin(5.5, 30, 5.5, 5.5))
+
+ggsave("../../Data/Figures/COSMIC_codon_count_LR_plot.png", width = 9, height = 5, dpi = 300)
+```
+
+### COSMIC count
+
+```{r, fig.width=9, fig.height=5}
+LR_edit %>%
+  filter(data_set == "clinvar_unique_public") %>%
+  filter(!threshold == "1-4") %>%
+  dplyr::filter(feature == "n_COSMIC") %>%
+  dplyr::arrange(gene_group, sensitivity) %>%
+
+  ggplot(aes(x = sensitivity, y = LR_pos, colour = gene_group, group = gene_group)) +
+
+  geom_errorbar(
+    aes(ymin = LR_pos_low95, ymax = LR_pos_high95),
+    width = 0.005,
+    linewidth = 0.4,
+    alpha = 0.7
+  ) +
+
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 1.5) +
+
+  geom_hline(
+    data = acmg_lr_pos,
+    aes(yintercept = lr),
+    linetype = "dotted",
+    colour = "grey40",
+    linewidth = 0.5,
+    inherit.aes = FALSE
+  ) +
+
+  geom_text(
+    data = acmg_lr_pos,
+    aes(x = 1.1, y = lr, label = level),
+    hjust = 1.05, vjust = -0.1,
+    colour = "grey40",
+    size = 3,
+    inherit.aes = FALSE
+  ) +
+
+  geom_text_repel(
+    data = ~ dplyr::filter(.x, gene_group == "RASopathy genes"),
+    aes(label = threshold),
+    size = 3,
+    show.legend = FALSE
+  ) +
+
+  scale_y_log10() +
+  coord_cartesian(clip = "off") +
+  labs(y = "Positive likelihood ratio") +
+  scale_colour_manual(values = safe_colorblind_palette) +
+  theme_bw() +
+  theme(plot.margin = margin(5.5, 30, 5.5, 5.5))
+```
+
+
+# RASopathy genes, all features {.tabset}
+
+```{r}
+plot_LR_thresholds <- function(data_set_name) {
+  plot_data <- LR_edit %>%
+    filter(data_set == data_set_name) %>%
+    filter(!threshold == "1-4") %>%
+    filter(gene_group == "RASopathy genes") %>%
+    arrange(feature, sensitivity)
+
+  ggplot(plot_data,
+         aes(x = sensitivity,
+             y = LR_pos,
+             colour = feature,
+             group = feature)) +
+
+    geom_errorbar(
+      aes(ymin = LR_pos_low95,
+          ymax = LR_pos_high95),
+      width = 0.005,
+      linewidth = 0.4,
+      alpha = 0.7
+    ) +
+
+    geom_line(linewidth = 0.8) +
+    geom_point(size = 1.5) +
+
+    geom_hline(
+      data = acmg_lr_pos,
+      aes(yintercept = lr),
+      linetype = "dotted",
+      colour = "grey40",
+      linewidth = 0.5,
+      inherit.aes = FALSE
+    ) +
+
+    geom_text(
+      data = acmg_lr_pos,
+      aes(x = 1.1, y = lr, label = level),
+      hjust = 1.05,
+      vjust = -0.1,
+      colour = "grey40",
+      size = 3,
+      inherit.aes = FALSE
+    ) +
+
+    geom_text_repel(
+      aes(label = threshold),
+      size = 3,
+      direction = "y",
+      force = 4,
+      box.padding = 0.4,
+      point.padding = 0.2,
+      max.overlaps = Inf,
+      segment.alpha = 0.6,
+      show.legend = FALSE
+    ) +
+
+    scale_y_log10() +
+    coord_cartesian(clip = "off") +
+    labs(y = "Positive likelihood ratio") +
+    scale_colour_manual(values = safe_colorblind_palette) +
+    theme_bw() +
+    theme(plot.margin = margin(5.5, 30, 5.5, 5.5))
+}
+```
+
+## Clinvar unique with twinsUK sperm data
+
+```{r}
+LR_test_dat <- LR_edit %>%
+  filter(data_set == "clinvar_unique_public") %>%
+  filter(!threshold == "1-4") %>%
+  filter(gene_group == "RASopathy genes") %>%
+  arrange(feature, sensitivity)
+
+plot_data <- LR_test_dat %>%
+  dplyr::filter(
+    is.finite(sensitivity),
+    is.finite(LR_pos),
+    LR_pos > 0
+  )
+```
+
+```{r, fig.width=9, fig.height=5}
+plot_LR_thresholds("clinvar_unique_public")
+```
+
+## Clinvar long with twinsUK sperm data
+
+```{r}
+plot_LR_thresholds("clinvar_long_public")
+```
+
+## DNM 31k long with twinsUK sperm data
+
+```{r}
+plot_LR_thresholds("DNMs_31k_long_public")
+```
+
+
+# Use hotcodon for strong evidence in any gene
+
+Showing the LR of hotcodon for different data types:
+
+```{r, fig.width=9, fig.height=3}
+LR_hotcodon <- LR_edit %>%
+  filter(feature == "hotcodon_cancer") %>%
+  filter(grepl("public", data_set)) %>%
+  arrange(gene_group, sensitivity) %>%
+  mutate(data_set = case_when(
+    data_set == "clinvar_unique_public"  ~ "ClinVar unique",
+    data_set == "clinvar_long_public"    ~ "ClinVar long",
+    data_set == "DNMs_31k_long_public"   ~ "DNM 31k long",
+    TRUE ~ data_set
+  ))
+
+ggplot(LR_hotcodon, aes(y = data_set, x = LR_pos)) +
+  geom_errorbarh(
+    aes(xmin = LR_pos_low95, xmax = LR_pos_high95),
+    width = 0.2,
+    alpha = 0.7
+  ) +
+  geom_vline(
+    data = acmg_lr_pos,
+    aes(xintercept = lr),
+    linetype = "dotted",
+    colour = "grey40",
+    linewidth = 0.5,
+    inherit.aes = FALSE
+  ) +
+  geom_text(
+    data = acmg_lr_pos,
+    aes(x = lr, y = Inf, label = level),
+    angle = 90,
+    colour = "grey50",
+    size = 3,
+    vjust = 1,
+    hjust = 1.1,
+    inherit.aes = FALSE
+  ) +
+  geom_point(size = 2) +
+  scale_x_log10() +
+  facet_wrap(~ gene_group) +
+  labs(x = "Positive likelihood ratio", y = "Data set") +
+  theme_bw() +
+  coord_cartesian(clip = "off") +
+  theme(plot.margin = margin(5.5, 20, 5.5, 5.5))
+```
+
+
+# Use n_COSMIC_codon_count > 1 for supporting evidence in RASopathy genes
+
+```{r, fig.width=7, fig.height=3}
+LR_plot <- LR_edit %>%
+  filter(feature == "n_COSMIC_codon_count") %>%
+  filter(threshold == ">1") %>%
+  filter(grepl("public", data_set)) %>%
+  arrange(gene_group, sensitivity)
+
+ggplot(LR_plot, aes(y = data_set, x = LR_pos)) +
+  geom_errorbarh(
+    aes(xmin = LR_pos_low95, xmax = LR_pos_high95),
+    width = 0.2,
+    alpha = 0.7
+  ) +
+  geom_vline(
+    data = acmg_lr_pos,
+    aes(xintercept = lr),
+    linetype = "dotted",
+    colour = "grey40",
+    linewidth = 0.5,
+    inherit.aes = FALSE
+  ) +
+  geom_text(
+    data = acmg_lr_pos,
+    aes(x = lr, y = Inf, label = level),
+    angle = 90,
+    colour = "grey50",
+    size = 3,
+    vjust = 1,
+    hjust = 1.1,
+    inherit.aes = FALSE
+  ) +
+  geom_point(size = 2) +
+  scale_x_log10() +
+  facet_wrap(~ gene_group) +
+  labs(x = "Positive likelihood ratio", y = "Data set") +
+  theme_bw() +
+  coord_cartesian(clip = "off") +
+  theme(plot.margin = margin(5.5, 20, 5.5, 5.5))
+```
+
+
+# Use n_COSMIC_codon_count > 2 for moderate evidence in RASopathy genes
+
+```{r, fig.width=7, fig.height=3}
+LR_plot <- LR_edit %>%
+  filter(feature == "n_COSMIC_codon_count") %>%
+  filter(threshold == ">2") %>%
+  filter(grepl("public", data_set)) %>%
+  arrange(gene_group, sensitivity)
+
+ggplot(LR_plot, aes(y = data_set, x = LR_pos)) +
+  geom_errorbarh(
+    aes(xmin = LR_pos_low95, xmax = LR_pos_high95),
+    width = 0.2,
+    alpha = 0.7
+  ) +
+  geom_vline(
+    data = acmg_lr_pos,
+    aes(xintercept = lr),
+    linetype = "dotted",
+    colour = "grey40",
+    linewidth = 0.5,
+    inherit.aes = FALSE
+  ) +
+  geom_text(
+    data = acmg_lr_pos,
+    aes(x = lr, y = Inf, label = level),
+    angle = 90,
+    colour = "grey50",
+    size = 3,
+    vjust = 1,
+    hjust = 1.1,
+    inherit.aes = FALSE
+  ) +
+  geom_point(size = 2) +
+  scale_x_log10() +
+  facet_wrap(~ gene_group) +
+  labs(x = "Positive likelihood ratio", y = "Data set") +
+  theme_bw() +
+  coord_cartesian(clip = "off") +
+  theme(plot.margin = margin(5.5, 20, 5.5, 5.5))
+```
+
+# Use n_COSMIC_codon_count thresholds in RASopathy genes
+
+## Positive LRs
+
+```{r, fig.width=3, fig.height=7}
+LR_plot <- LR_edit %>%
+  filter(feature == "n_COSMIC_codon_count") %>%
+  filter(!threshold %in% c("1-4", ">20", ">50")) %>%
+  filter(gene_group == "RASopathy genes") %>%
+  filter(grepl("public", data_set)) %>%
+  mutate(data_set = case_when(
+    data_set == "clinvar_unique_public" ~ "ClinVar unique",
+    data_set == "clinvar_long_public"   ~ "ClinVar long",
+    data_set == "DNMs_31k_long_public"  ~ "DNM 31k long",
+    TRUE ~ data_set
+  )) %>%
+  mutate(threshold = factor(threshold, levels = c(">0", ">1", ">2", ">3", ">5", ">10")))
+
+ggplot(LR_plot, aes(y = data_set, x = LR_pos)) +
+  geom_errorbarh(
+    aes(xmin = LR_pos_low95, xmax = LR_pos_high95),
+    width = 0.2,
+    alpha = 0.7
+  ) +
+  geom_vline(
+    data = acmg_lr_pos,
+    aes(xintercept = lr),
+    linetype = "dotted",
+    colour = "grey40",
+    linewidth = 0.5,
+    inherit.aes = FALSE
+  ) +
+  geom_text(
+    data = acmg_lr_pos,
+    aes(x = lr, y = Inf, label = level),
+    angle = 90,
+    colour = "grey50",
+    size = 3,
+    vjust = 1,
+    hjust = 1.1,
+    inherit.aes = FALSE
+  ) +
+  geom_point(size = 2) +
+  scale_x_log10() +
+  facet_wrap(~ threshold, ncol = 1) +
+  labs(x = "Positive likelihood ratio", y = "") +
+  theme_bw() +
+  coord_cartesian(clip = "off") +
+  theme(plot.margin = margin(5.5, 20, 5.5, 5.5))
+
+ggsave("../../Data/Figures/COSMIC_codon_count_LR_thresholds_plot.png", width = 3, height = 7, dpi = 300)
+```
+
+## Negative LR
+
+```{r, fig.width=4, fig.height=2}
+ggplot(LR_plot %>% filter(threshold == ">0") %>%
+         mutate(threshold = "0"),
+       aes(y = data_set, x = LR_neg)) +
+  geom_errorbarh(
+    aes(xmin = LR_neg_low95, xmax = LR_neg_high95),
+    width = 0.2,
+    alpha = 0.7
+  ) +
+  geom_vline(
+    data = acmg_lr_neg,
+    aes(xintercept = lr),
+    linetype = "dotted",
+    colour = "grey40",
+    linewidth = 0.5,
+    inherit.aes = FALSE
+  ) +
+  geom_text(
+    data = acmg_lr_neg,
+    aes(x = lr, y = Inf, label = level),
+    angle = 90,
+    colour = "grey50",
+    size = 3,
+    vjust = 1,
+    hjust = 1.1,
+    inherit.aes = FALSE
+  ) +
+  geom_point(size = 2) +
+  facet_wrap(~ factor(threshold, levels = c("0")), ncol = 1) +
+  scale_x_log10() +
+  labs(x = "Negative likelihood ratio", y = "") +
+  theme_bw() +
+  coord_cartesian(clip = "off") +
+  theme(plot.margin = margin(5.5, 20, 5.5, 5.5))
+
+ggsave("../../Data/Figures/COSMIC_codon_count_LR_thresholds_neg_plot.png", width = 4, height = 2, dpi = 300)
+```

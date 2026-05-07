@@ -1,0 +1,253 @@
+---
+title: "Gene group LR models and single-feature AUCs"
+output: html_document
+date: "2025-03-20"
+---
+
+# Aim
+
+For each gene group, calculate:
+
+1. AUC for individual somatic and computational features (on all data)
+2. Logistic regression model AUC combining one CEP + log-transformed COSMIC/sperm/buccal codon counts (on held-out test data), with DeLong test vs CEP-only model
+
+Gene groups: AltFunc, AltFunc minus RASopathy, LOF, Other, RASopathy, All
+Mutation datasets: ClinVar path vs Biobank (unique and long_uncontaminated), DNM vs Biobank (unique and long_uncontaminated)
+CEPs: REVEL, AlphaMissense, ESM1b
+
+Model training: 10 × 10-fold repeated cross-validation, downsampling for class imbalance.
+
+```{r, message=FALSE}
+library(tidyverse)
+library(janitor)
+library(pROC)
+library(caret)
+library(PRROC)
+
+date <- "240426"
+
+dir.create("../../../Data/AUC_tables/Gene_group_models",  recursive = TRUE, showWarnings = FALSE)
+dir.create("../../../Data/LR_models/Gene_group_models",   recursive = TRUE, showWarnings = FALSE)
+```
+
+# Import data
+
+```{r, message=FALSE}
+input_folder <- "../../../Data/ML_model_input/Gene_group_models/"
+
+# Load train/test split files (named e.g. clinvar_unique_set1_altfunc_train_240426.csv.gz)
+csv_files <- list.files(input_folder, pattern = paste0(date, "\\.csv\\.gz$"), full.names = TRUE)
+
+for (file in csv_files) {
+  file_name <- tools::file_path_sans_ext(tools::file_path_sans_ext(basename(file)))
+  assign(file_name, readr::read_csv(file, show_col_types = FALSE), envir = .GlobalEnv)
+}
+
+# Load whole-dataset files (unique and long, for single-feature AUCs)
+bases <- c("Clinvar_vs_Biobank_unique", "Clinvar_vs_Biobank_long",
+           "DNM_vs_Biobank_unique",     "DNM_vs_Biobank_long")
+sets  <- c("set1")
+
+for (base in bases) {
+  for (set in sets) {
+    obj_name  <- paste0(base, "_", set, "_", date)
+    file_path <- file.path(input_folder, paste0(base, "_", set, "_", date, ".csv.gz"))
+    assign(obj_name, read_csv(file_path, show_col_types = FALSE))
+  }
+}
+```
+
+# LR model training
+
+```{r}
+set.seed(42)
+seeds <- vector(mode = "list", length = 101)
+for (i in 1:100) seeds[[i]] <- sample.int(1000, 1)
+seeds[[101]] <- sample.int(1000, 1)
+
+twoClassSummary_pathogenic <- function(data, lev = NULL, model = NULL) {
+  if (is.null(lev)) lev <- levels(data$obs)
+  roc_obj <- pROC::roc(response  = data$obs,
+                       predictor = data[, "Pathogenic"],
+                       levels    = c("Benign", "Pathogenic"),
+                       quiet     = TRUE)
+  c(ROC  = as.numeric(pROC::auc(roc_obj)),
+    Sens = caret::sensitivity(data$pred, data$obs, positive = "Pathogenic"),
+    Spec = caret::specificity(data$pred, data$obs, negative = "Pathogenic"))
+}
+
+trctrl <- trainControl(
+  method          = "repeatedcv",
+  number          = 10,
+  repeats         = 10,
+  sampling        = "down",
+  summaryFunction = twoClassSummary_pathogenic,
+  classProbs      = TRUE,
+  seeds           = seeds
+)
+```
+
+```{r}
+preprocess_df <- function(df, cep) {
+  df %>%
+    mutate(
+      Pathogenicity_category   = factor(Pathogenicity_category, levels = c("Benign", "Pathogenic")),
+      n_COSMIC_codon_count_log = log1p(n_COSMIC_codon_count),
+      n_sperm_codon_count_log  = log1p(n_sperm_codon_count),
+      n_buccal_codon_count_log = log1p(n_buccal_codon_count)
+    ) %>%
+    select(
+      Pathogenicity_category,
+      !!sym(cep),
+      n_COSMIC_codon_count_log,
+      n_sperm_codon_count_log,
+      n_buccal_codon_count_log
+    ) %>%
+    drop_na()
+}
+
+extract_coefs <- function(model, cep) {
+  cf   <- coef(model$finalModel)
+  getc <- function(nm) if (nm %in% names(cf)) unname(cf[[nm]]) else NA_real_
+  tibble(
+    coef_intercept = getc("(Intercept)"),
+    coef_cep       = getc(cep),
+    coef_COSMIC    = getc("n_COSMIC_codon_count_log"),
+    coef_sperm     = getc("n_sperm_codon_count_log"),
+    coef_buccal    = getc("n_buccal_codon_count_log")
+  )
+}
+
+train_lr <- function(train_df, formula) {
+  train(formula, data = train_df, method = "glm", family = "binomial",
+        trControl = trctrl, metric = "ROC")
+}
+
+compute_test_row <- function(data_name, gene_group, set, cep,
+                             lr_full, lr_cep, test_df, coef_tbl) {
+  probs_full <- predict(lr_full, test_df, type = "prob")[, "Pathogenic"]
+  probs_cep  <- predict(lr_cep,  test_df, type = "prob")[, "Pathogenic"]
+
+  roc_full   <- roc(test_df$Pathogenicity_category, probs_full, quiet = TRUE)
+  roc_cep    <- roc(test_df$Pathogenicity_category, probs_cep,  quiet = TRUE)
+  ci_full    <- ci.auc(roc_full)
+  ci_cep     <- ci.auc(roc_cep)
+
+  dl         <- roc.test(roc_full, roc_cep, method = "delong")
+
+  bind_cols(
+    tibble(
+      data_name      = data_name, gene_group = gene_group, gene_set = set,
+      cep            = cep,       test_or_train = "test",
+      AUC_full       = round(auc(roc_full), 3),
+      AUC_full_lower = round(ci_full[1], 3),  AUC_full_upper = round(ci_full[3], 3),
+      AUC_cep_only   = round(auc(roc_cep),  3),
+      AUC_cep_lower  = round(ci_cep[1],  3),  AUC_cep_upper  = round(ci_cep[3],  3),
+      delong_p_value = signif(dl$p.value, 3),
+      AUC_diff       = round(dl$estimate[[1]] - dl$estimate[[2]], 3),
+      AUC_diff_lower = round(dl$conf.int[[1]], 3),
+      AUC_diff_upper = round(dl$conf.int[[2]], 3)
+    ),
+    coef_tbl
+  )
+}
+```
+
+```{r}
+data_names  <- c("clinvar_long_uncontaminated", "clinvar_unique",
+                 "DNM_long_uncontaminated",     "DNM_unique")
+sets        <- c("set1")
+gene_groups <- c("altfunc", "altfunc_minus_RAS", "lof", "other", "RASopathy", "all")
+CEPs        <- c("REVEL", "AlphaMissense", "ESM1b")
+
+save_dir    <- "../../../Data/LR_models/Gene_group_models/"
+
+all_auc_results <- tibble()
+
+for (data_name in data_names) {
+  for (gene_group in gene_groups) {
+    for (set in sets) {
+      for (cep in CEPs) {
+
+        train_obj <- paste0(data_name, "_", set, "_", gene_group, "_train_", date)
+        test_obj  <- paste0(data_name, "_", set, "_", gene_group, "_test_",  date)
+        if (!exists(train_obj) || !exists(test_obj)) next
+
+        train_df <- preprocess_df(get(train_obj), cep)
+        test_df  <- preprocess_df(get(test_obj),  cep)
+
+        lr_full <- train_lr(train_df, Pathogenicity_category ~ .)
+        save(lr_full, file = file.path(
+          save_dir, paste0(data_name, "_", set, "_", gene_group, "_", cep, "_lr_full_", date, ".rda")
+        ))
+
+        lr_cep <- train_lr(train_df, as.formula(paste0("Pathogenicity_category ~ ", cep)))
+
+        coef_tbl <- extract_coefs(lr_full, cep)
+
+        probs_tr <- predict(lr_full, train_df, type = "prob")[, "Pathogenic"]
+        roc_tr   <- roc(train_df$Pathogenicity_category, probs_tr, quiet = TRUE)
+        ci_tr    <- ci.auc(roc_tr)
+
+        auc_train <- bind_cols(
+          tibble(
+            data_name = data_name, gene_group = gene_group, cep = cep,
+            gene_set = set, test_or_train = "train",
+            AUC_full = round(auc(roc_tr), 3),
+            AUC_full_lower = round(ci_tr[1], 3),
+            AUC_full_upper = round(ci_tr[3], 3)
+          ),
+          coef_tbl
+        )
+
+        auc_test <- compute_test_row(data_name, gene_group, set, cep,
+                                     lr_full, lr_cep, test_df, coef_tbl)
+
+        all_auc_results <- bind_rows(all_auc_results, auc_train, auc_test)
+      }
+    }
+  }
+}
+
+write_csv(all_auc_results,
+          paste0("../../../Data/AUC_tables/Gene_group_models/AUC_table_gene_groups_LR_models_", date, ".csv"))
+```
+
+# Gene and variant counts per group
+
+```{r}
+gene_count_DF    <- data.frame()
+variant_count_DF <- data.frame()
+
+for (data_name in data_names) {
+  for (gene_group in gene_groups) {
+    for (set in sets) {
+      train_name <- paste0(data_name, "_", set, "_", gene_group, "_train_", date)
+      test_name  <- paste0(data_name, "_", set, "_", gene_group, "_test_",  date)
+
+      combined <- bind_rows(get(train_name), get(test_name))
+
+      gene_count_DF <- rbind(gene_count_DF, data.frame(
+        gene_group = gene_group, data_name = data_name, gene_set = set,
+        gene_count = combined %>% count(gene) %>% nrow()
+      ))
+
+      variant_count_DF <- rbind(variant_count_DF, data.frame(
+        gene_group        = gene_group, data_name = data_name, gene_set = set,
+        n_path_variants   = sum(combined$Pathogenicity_category == "Pathogenic"),
+        n_benign_variants = sum(combined$Pathogenicity_category == "Benign")
+      ))
+    }
+  }
+}
+
+gene_count_DF
+variant_count_DF
+```
+
+```{r}
+write_csv(gene_count_DF,
+          paste0("../../../Data/AUC_tables/Gene_group_models/Gene_counts_per_group_", date, ".csv"))
+write_csv(variant_count_DF,
+          paste0("../../../Data/AUC_tables/Gene_group_models/Variant_counts_per_group_", date, ".csv"))
+```

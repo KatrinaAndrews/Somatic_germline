@@ -1,0 +1,104 @@
+---
+title: "Define somatic selection gene groups"
+output:
+  html_document:
+    df_print: paged
+    code_folding: hide
+date: "2026-02-24"
+---
+
+# Aim
+
+**Documentation record** — outputs already exist in `Data/Gene_definitions/`. Re-run only if gene list sources change.
+
+Define the union of somatic selection genes (sperm and buccal nanoseq) and COSMIC cancer genes, then create phenotype-defined subsets:
+
+-   `Somatic_selection_cancer_genes.csv` — all genes under somatic selection or in COSMIC CGC
+-   `Macrocephaly_monoallelic_DD_somatic_genes.csv` — macrocephaly/megalencephaly panel genes that are also monoallelic DDG2P and somatic selection genes
+
+The analysis section of `Pathway_GO_analysis.Rmd` (Script 10) reads these outputs.
+
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(janitor)
+```
+
+# Define somatic selection genes and cancer genes
+
+```{r, message=FALSE, warning=FALSE}
+sperm_selection_genes <- c(
+  "PTPN11", "MIB1", "RIT1", "FGFR3", "EP300", "FGFR2", "KDM5B", "NF1", "SMAD6",
+  "CUL3", "RASA2", "PRRC2A", "PTEN", "ROBO1", "DDX3X", "CSNK2B", "KRAS", "PPM1D",
+  "ARID1A", "BRAF", "HRAS", "KMT2E", "SCAF4", "BMPR2", "TCF12", "CCAR2", "DHX9", "NSD1",
+  "LZTR1", "ARHGAP35", "CBL", "SSX1", "RBM12", "SMAD4", "FAM222B",
+  "KDM5C", "KMT2D", "AR", "CTNNB1", "RAF1"
+)
+
+buccal_selection_genes <- c(
+  "NOTCH1", "FAT1", "TP53", "NOTCH2", "ATM", "MGA", "KMT2C", "ASXL1", "CHEKC2",
+  "TET2", "PPM1D", "BCORL1", "ARID1A", "SETD2", "ZFP36L2", "ARID2", "EP300", "NOTCH3",
+  "KDM5C", "RAC1", "ARID1B", "RBM10", "KDM6A", "STAG2", "EPHA2", "CIC", "SF3B1",
+  "ZFP36L1", "EGFR", "DNMT3A", "PIK3R1", "TP63", "ARID5B", "AJUBA", "FGFR3", "ZNF750",
+  "FUBP1", "CUL3", "KLF5", "PAX9", "FOXP1", "ETV6", "RHOA", "RARG", "SPOP", "SMARCB1",
+  "CCND1", "HLA-B", "EIF1AX", "PIK3CA"
+)
+
+somatic_selection_genes <- union(sperm_selection_genes, buccal_selection_genes)
+
+cancer_gene_census <- read_tsv("../../Data/Gene_definitions/Cosmic_CancerGeneCensus_v98_GRCh37.tsv.gz",
+                               show_col_types = FALSE)
+cancer_genes <- cancer_gene_census %>% pull(GENE_SYMBOL) %>% unique()
+
+somatic_selection_and_cancer_genes <- union(somatic_selection_genes, cancer_genes)
+
+write_csv(
+  data.frame(gene = somatic_selection_and_cancer_genes),
+  "../../Data/Gene_definitions/Somatic_selection_cancer_genes.csv"
+)
+```
+
+# Phenotype-defined gene lists
+
+## Macrocephaly / megalencephaly
+
+DDG2P monoallelic genes with macrocephaly HPO term intersected with PanelApp Australia macrocephaly/megalencephaly panel, then further subset to somatic selection genes.
+
+```{r, message=FALSE, warning=FALSE}
+DDG2P <- read_csv("../../Data/DDG2P/G2P_DD_2025-04-16.csv") %>% clean_names()
+
+DDG2P_monoallelic <- DDG2P %>%
+  filter(allelic_requirement %in% c("monoallelic_autosomal", "monoallelic_X_heterozygous"))
+
+macrocephaly_HPO <- "HP:0000256"
+
+DDG2P_macrocephaly_mono <- DDG2P_monoallelic %>%
+  filter(str_detect(phenotypes, macrocephaly_HPO)) %>%
+  pull(gene_symbol) %>%
+  unique()
+```
+
+```{r, warning=FALSE, message=FALSE}
+# DATA_SOURCE: PanelApp Australia — Macrocephaly/Megalencephaly panel (green genes)
+# Download from https://panelapp.agha.umccr.org/ and save to Data/DDG2P/ or similar
+# File used: PanelApp_Aus_Macrocephaly_Megalencephaly_green_genes_120326.tsv
+panelapp_macrocephaly <- read_tsv("../../Data/DDG2P/PanelApp_Aus_Macrocephaly_Megalencephaly_green_genes_120326.tsv") %>%
+  clean_names() %>%
+  filter(gene_symbol %in% DDG2P_monoallelic$gene_symbol) %>%
+  pull(gene_symbol) %>%
+  unique()
+
+panelapp_macrocephaly_somatic <- intersect(panelapp_macrocephaly, somatic_selection_and_cancer_genes)
+
+write_csv(
+  data.frame(gene = panelapp_macrocephaly_somatic),
+  "../../Data/Gene_definitions/Macrocephaly_monoallelic_DD_somatic_genes.csv"
+)
+```
+
+Gene counts:
+
+```{r}
+cat("DDG2P macrocephaly HPO genes:", length(DDG2P_macrocephaly_mono), "\n")
+cat("PanelApp macrocephaly + DDG2P monoallelic:", length(panelapp_macrocephaly), "\n")
+cat("PanelApp macrocephaly + somatic selection:", length(panelapp_macrocephaly_somatic), "\n")
+```

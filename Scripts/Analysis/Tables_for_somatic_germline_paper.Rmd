@@ -1,0 +1,224 @@
+---
+title: "Somatic germline paper tables"
+output:
+  html_document:
+    df_print: paged
+    code_folding: hide
+date: "2026-02-05"
+---
+
+# Aim
+Generate and export all manuscript tables in order of appearance.
+
+Note: Tables 1 and 2 are hard-coded in LaTeX and do not require R generation.
+
+Supplementary Table 3 (list of MAVE studies) is compiled manually and not generated here.
+
+```{r, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(DT)
+library(knitr)
+
+date <- "240426"
+
+dir.create("../../Data/Tables", recursive = TRUE, showWarnings = FALSE)
+
+recode_data_name <- function(x) {
+  dplyr::case_match(x,
+    "clinvar_long_uncontaminated" ~ "clinvar_count_weighted",
+    "DNM_long_uncontaminated"     ~ "DNM_count_weighted",
+    "clinvar_long"                ~ "clinvar_count_weighted",
+    "DNM_long"                    ~ "DNM_count_weighted",
+    .default = x
+  )
+}
+```
+
+```{r, warning=FALSE, include=FALSE}
+Clinvar_vs_Biobank <- read_csv("../../Data/ML_model_input/Gene_group_models/Clinvar_vs_Biobank_unique_set1_240426.csv.gz")
+DNM_vs_Biobank     <- read_csv("../../Data/ML_model_input/Gene_group_models/DNM_vs_Biobank_unique_set1_240426.csv.gz")
+tmp_clinvar        <- read_tsv("../../Data/Variant_lists/Clinvar_DDG2P_missense_path_annot_240426_public.tsv.gz")
+```
+
+```{r, warning=FALSE, message=FALSE}
+altfunc           <- read_csv("../../Data/Gene_definitions/DDG2P_2025_dominant_selection_genes_AltFunc.csv") %>% pull(gene_symbol)
+altfunc_stringent <- read_csv("../../Data/Gene_definitions/DDG2P_2025_dominant_selection_genes_AltFunc_stringent.csv") %>% pull(gene_symbol)
+lof               <- read_csv("../../Data/Gene_definitions/DDG2P_2025_dominant_selection_genes_LOF.csv") %>% pull(gene_symbol)
+other             <- read_csv("../../Data/Gene_definitions/DDG2P_2025_dominant_selection_genes_other.csv") %>% pull(gene_symbol)
+RASopathies       <- read_csv("../../Data/Gene_definitions/RASopathy_genes_VCEP_030425.csv", show_col_types = FALSE) %>% pull(gene)
+altfunc_minus_RAS <- setdiff(altfunc, RASopathies)
+macrocephaly      <- read_csv("../../Data/Gene_definitions/Macrocephaly_monoallelic_DD_somatic_genes.csv") %>% pull(gene)
+```
+
+```{r, warning=FALSE, include=FALSE}
+AUCs_individual_features <- read_csv(paste0("../../Data/AUC_tables/Gene_group_models/AUC_table_gene_groups_single_features_", date, ".csv")) %>%
+  mutate(data_name = recode_data_name(data_name))
+
+AUCs_LR_model <- read_csv(paste0("../../Data/AUC_tables/Gene_group_models/AUC_table_gene_groups_LR_models_", date, ".csv")) %>%
+  mutate(Predictor = paste0(cep, "_LR_model_", test_or_train, "_data"),
+         data_name = recode_data_name(data_name))
+
+AUCs <- bind_rows(AUCs_LR_model, AUCs_individual_features) %>%
+  dplyr::select(Predictor, data_name, gene_group,
+                AUC_full, AUC_full_lower, AUC_full_upper, everything()) %>%
+  dplyr::select(-any_of("gene_set"))
+
+n_genes <- read_csv(paste0("../../Data/AUC_tables/Gene_group_models/Gene_counts_per_group_", date, ".csv")) %>%
+  mutate(data_name = recode_data_name(data_name))
+n_vars  <- read_csv(paste0("../../Data/AUC_tables/Gene_group_models/Variant_counts_per_group_", date, ".csv")) %>%
+  mutate(data_name = recode_data_name(data_name))
+
+performance <- read_csv("../../Data/Tables/Gene_group_single_feature_metrics.csv") %>%
+  mutate(data_name = recode_data_name(data_name))
+```
+
+```{r, warning=FALSE, message=FALSE}
+gene_AUCs_individual_features <- read_csv("../../Data/AUC_tables/Gene_group_hold_out_models/Single_feature_AUCs_individual_genes_240426.csv") %>%
+  mutate(dataset = recode_data_name(dataset))
+gene_AUCs_LR_model            <- read_csv("../../Data/AUC_tables/Gene_group_hold_out_models/AUC_table_gene_holdout_LR_models_240426.csv") %>%
+  mutate(dataset = recode_data_name(dataset))
+n_vars_per_gene               <- read_csv("../../Data/AUC_tables/Gene_group_hold_out_models/Variant_counts_per_gene_240426.csv")
+
+n_vars_per_gene_clinvar <- n_vars_per_gene %>%
+  filter(data_set %in% c("clinvar_mutation_data_unique", "clinvar_mutation_data_long")) %>%
+  pivot_wider(names_from = data_set, values_from = c(n_path_variants, n_benign_variants)) %>%
+  dplyr::select(-n_benign_variants_clinvar_mutation_data_long) %>%
+  dplyr::rename(
+    n_benign            = n_benign_variants_clinvar_mutation_data_unique,
+    n_unique_pathogenic = n_path_variants_clinvar_mutation_data_unique,
+    n_pathogenic        = n_path_variants_clinvar_mutation_data_long
+  )
+```
+
+```{r, warning=FALSE, message=FALSE}
+LR <- read_csv("../../Data/LR_calculations/LR_table.csv")
+```
+
+```{r}
+# Per-gene somatic AUC summary in clinvar_long dataset
+genes_clinvar_long_auc <- gene_AUCs_individual_features %>%
+  filter(dataset == "clinvar_count_weighted") %>%
+  filter(Predictor %in% c("n_COSMIC_codon_count", "n_sperm_codon_count", "n_buccal_codon_count")) %>%
+  group_by(gene) %>%
+  summarise(max_AUC_lower = max(AUC_full_lower, na.rm = TRUE), .groups = "drop") %>%
+  filter(is.finite(max_AUC_lower)) %>%
+  mutate(
+    auc_lower_06 = max_AUC_lower > 0.6,
+    auc_lower_08 = max_AUC_lower > 0.8
+  )
+
+genes_clinvar_long <- genes_clinvar_long_auc$gene
+```
+
+---
+
+# Table 3: Number of genes with somatic predictive power
+
+```{r}
+table3 <- read_csv("../../Data/Tables/Table_3_gene_groups_and_somatic_AUCs.csv",
+                   show_col_types = FALSE)
+knitr::kable(table3, caption = "Table 3: Genes with somatic predictive power by gene group")
+```
+
+---
+
+# Supplementary Table 1: Full benchmarking results (all gene groups)
+
+Single-feature predictor performance metrics for all gene groups across dataset types.
+
+```{r}
+supp_table1 <- performance %>%
+  dplyr::select(-any_of("gene_set")) %>%
+  dplyr::select(gene_group, data_name, everything())
+
+write_csv(supp_table1, "../../Data/Tables/Supplementary_Table1.csv")
+
+DT::datatable(supp_table1,
+              caption = "Supplementary Table 1: Full benchmarking results",
+              filter = "top", rownames = FALSE,
+              options = list(pageLength = 20, scrollX = TRUE))
+```
+
+---
+
+# Supplementary Table 2: AUC for each feature for each gene
+
+Single-feature AUC values for individual genes in both clinvar_unique and clinvar_count_weighted datasets.
+
+```{r}
+supp_table2 <- gene_AUCs_individual_features %>%
+  filter(dataset %in% c("clinvar_unique", "clinvar_count_weighted")) %>%
+  dplyr::select(gene, dataset, everything())
+
+write_csv(supp_table2, "../../Data/Tables/Supplementary_Table2.csv")
+
+DT::datatable(supp_table2,
+              caption = "Supplementary Table 2: Individual gene single-feature AUCs",
+              filter = "top", rownames = FALSE,
+              options = list(pageLength = 20, scrollX = TRUE))
+```
+
+---
+
+# Supplementary Table 3: List of MAVE studies
+
+_This table lists the deep mutational scanning studies used in this analysis. It is compiled manually and not generated by R._
+
+---
+
+# Supplementary Table 4: Performance of LR models with DeLong p-values
+
+Gene group-level logistic regression model performance (test set), with DeLong test comparing REVEL-only vs REVEL + somatic data.
+
+```{r}
+supp_table4 <- AUCs_LR_model %>%
+  filter(test_or_train == "test") %>%
+  dplyr::select(gene_group, data_name, cep,
+                AUC_full, AUC_full_lower, AUC_full_upper,
+                AUC_cep_only, AUC_cep_lower, AUC_cep_upper,
+                AUC_diff, AUC_diff_lower, AUC_diff_upper,
+                delong_p_value)
+
+write_csv(supp_table4, "../../Data/Tables/Supplementary_Table4.csv")
+
+DT::datatable(supp_table4,
+              caption = "Supplementary Table 4: LR model performance with DeLong p-values",
+              filter = "top", rownames = FALSE,
+              options = list(pageLength = 20, scrollX = TRUE))
+```
+
+---
+
+# Supplementary Table 5: Logistic regression model results for individual genes
+
+Individual gene-level logistic regression model performance (test set), with DeLong test comparing REVEL-only vs REVEL + somatic data.
+
+```{r}
+supp_table5 <- gene_AUCs_LR_model %>%
+  filter(test_or_train == "test") %>%
+  dplyr::select(gene, dataset, everything(), -test_or_train)
+
+write_csv(supp_table5, "../../Data/Tables/Supplementary_Table5.csv")
+
+DT::datatable(supp_table5,
+              caption = "Supplementary Table 5: Individual gene LR model performance with DeLong p-values",
+              filter = "top", rownames = FALSE,
+              options = list(pageLength = 20, scrollX = TRUE))
+```
+
+---
+
+# Supplementary Table 6: Likelihood ratios for somatic feature cutoffs
+
+Positive and negative likelihood ratios for COSMIC and Nanoseq feature thresholds against ClinVar unique pathogenic variants.
+
+```{r}
+supp_table6 <- LR %>% filter(data_set == "clinvar_unique_public")
+
+write_csv(supp_table6, "../../Data/Tables/Supplementary_Table6.csv")
+
+DT::datatable(supp_table6,
+              caption = "Supplementary Table 6: Likelihood ratios",
+              filter = "top", rownames = FALSE,
+              options = list(pageLength = 20, scrollX = TRUE))
+```

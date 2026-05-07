@@ -1,0 +1,279 @@
+---
+title: "Auto-ACMG RASopathy results analysis"
+output: html_document
+date: "2025-10-21"
+---
+
+# Aim
+
+Visualise results of auto-ACMG analysis before and after somatic evidence weighting
+for RASopathy variants in ClinVar.
+
+```{r, message=FALSE}
+library(tidyverse)
+
+safe_colorblind_palette <- c("#88CCEE", "#CC6677", "#DDCC77", "#117733", "#332288", "#AA4499",
+                             "#44AA99", "#999933", "#882255", "#661100", "#6699CC", "#888888")
+
+colours <- c(
+  "Likely benign"    = "#88CCEE",
+  "Benign"           = "#6699CC",
+  "VUS"              = "#DDCC77",
+  "Likely pathogenic"= "#CC6677",
+  "Pathogenic"       = "#993333"
+)
+
+dir.create("../../Data/Figures/Final", recursive = TRUE, showWarnings = FALSE)
+dir.create("../../Data/Figures",       recursive = TRUE, showWarnings = FALSE)
+```
+
+```{r load-baseline, message=FALSE}
+acmg_cols <- c("chrom", "pos", "ref", "alt", "gene", "codon_change",
+                "criteria_met", "acmg_class")
+
+path <- read_tsv("../../Data/auto_ACMG_output/Clinvar_path_ACMG_240426.tsv",
+                 show_col_types = FALSE) %>%
+  dplyr::select(all_of(acmg_cols)) %>%
+  mutate(group = "Pathogenic")
+
+ben <- read_tsv("../../Data/auto_ACMG_output/Clinvar_benign_ACMG_240426.tsv",
+                show_col_types = FALSE) %>%
+  dplyr::select(all_of(acmg_cols)) %>%
+  mutate(group = "Benign")
+
+vus_raw <- read_tsv("../../Data/auto_ACMG_output/Clinvar_VUS_ACMG_240426.tsv",
+                    show_col_types = FALSE) %>%
+  dplyr::select(all_of(acmg_cols))
+
+# Split VUS into VUS vs Conflicting using ClinVar metadata
+Clinvar_VUS_or_conflicting <- read_tsv(
+  "../../Data/Clinvar_060225/Clinvar_build_38_DDG2P_germline_VUS_conflicting_missense.tsv.gz",
+  show_col_types = FALSE
+) %>%
+  mutate(var_ID = paste0("chr", Chromosome, "_", PositionVCF, "_",
+                         ReferenceAlleleVCF, "_", AlternateAlleleVCF)) %>%
+  dplyr::select(var_ID, ClinicalSignificance, PhenotypeList)
+
+vus <- vus_raw %>%
+  mutate(var_ID = paste(chrom, pos, ref, alt, sep = "_")) %>%
+  left_join(Clinvar_VUS_or_conflicting, by = "var_ID") %>%
+  mutate(group = case_when(
+    ClinicalSignificance == "Uncertain significance"                       ~ "VUS",
+    ClinicalSignificance == "Conflicting classifications of pathogenicity" ~ "Conflicting",
+    TRUE ~ NA_character_
+  )) %>%
+  filter(!is.na(group)) %>%
+  dplyr::select(-var_ID, -ClinicalSignificance, -PhenotypeList)
+
+all_dat <- bind_rows(path, ben, vus) %>%
+  mutate(acmg_class = factor(acmg_class,
+                              levels = c("Benign", "Likely benign", "VUS",
+                                         "Likely pathogenic", "Pathogenic")))
+```
+
+```{r load-somatic, message=FALSE}
+vus_raw_somatic <- read_tsv(
+  "../../Data/auto_ACMG_output/Clinvar_VUS_ACMG_somatic_240426.tsv",
+  show_col_types = FALSE
+) %>%
+  dplyr::select(all_of(acmg_cols))
+
+vus_somatic <- vus_raw_somatic %>%
+  mutate(var_ID = paste(chrom, pos, ref, alt, sep = "_")) %>%
+  left_join(Clinvar_VUS_or_conflicting, by = "var_ID") %>%
+  mutate(group = case_when(
+    ClinicalSignificance == "Uncertain significance"                       ~ "VUS",
+    ClinicalSignificance == "Conflicting classifications of pathogenicity" ~ "Conflicting",
+    TRUE ~ NA_character_
+  )) %>%
+  filter(!is.na(group)) %>%
+  dplyr::select(-var_ID, -ClinicalSignificance, -PhenotypeList) %>%
+  mutate(acmg_class = factor(acmg_class,
+                              levels = c("Benign", "Likely benign", "VUS",
+                                         "Likely pathogenic", "Pathogenic")))
+```
+
+```{r counts}
+path %>% count(acmg_class)
+ben  %>% count(acmg_class)
+vus  %>% count(acmg_class)
+```
+
+# Auto-ACMG before somatic weighting
+
+```{r plot-before, fig.width=8, fig.height=2.5}
+ggplot(all_dat,
+       aes(x = factor(group, levels = c("Benign", "VUS", "Conflicting", "Pathogenic")),
+           fill = acmg_class)) +
+  geom_bar(position = "fill") +
+  scale_fill_manual(values = colours) +
+  labs(x = "ClinVar classification", fill = "Auto-ACMG outcome", y = "Proportion") +
+  coord_flip()
+```
+
+```{r plot-before-vus, fig.width=8, fig.height=2}
+plot_vus_only <- ggplot(
+  all_dat %>% filter(group %in% c("VUS", "Conflicting")),
+  aes(x = factor(group, levels = c("VUS", "Conflicting")), fill = acmg_class)
+) +
+  geom_bar(position = "fill") +
+  scale_fill_manual(values = colours) +
+  labs(x = "ClinVar class", fill = "Auto-ACMG outcome", y = "Proportion") +
+  coord_flip()
+
+plot_vus_only
+
+ggsave("../../Data/Figures/auto_acmg_before_somatic_weight_vus.png",
+       plot = plot_vus_only, width = 8, height = 1.8, units = "in")
+```
+
+# Auto-ACMG after somatic weighting
+
+```{r plot-after, fig.width=8, fig.height=2}
+plot2 <- ggplot(vus_somatic,
+                aes(x = factor(group, levels = c("VUS", "Conflicting")),
+                    fill = acmg_class)) +
+  geom_bar(position = "fill") +
+  scale_fill_manual(values = colours) +
+  labs(x = "ClinVar class", fill = "Auto-ACMG outcome", y = "Proportion") +
+  coord_flip()
+
+plot2
+
+ggsave("../../Data/Figures/Auto_ACMG_after_somatic_weighting.png",
+       plot2, width = 8, height = 1.8, units = "in")
+```
+
+# VUS before vs after somatic weighting
+
+```{r plot-combined-vus, fig.width=7, fig.height=3}
+combined_plotdat <- bind_rows(
+  all_dat %>%
+    filter(group %in% c("VUS", "Conflicting")) %>%
+    mutate(dataset = "Auto ACMG outcome before somatic weighting"),
+  vus_somatic %>%
+    mutate(dataset = "Auto ACMG outcome after somatic weighting")
+) %>%
+  mutate(dataset = factor(dataset,
+                          levels = c("Auto ACMG outcome before somatic weighting",
+                                     "Auto ACMG outcome after somatic weighting")))
+
+thresh <- 0.04
+
+label_dat <- combined_plotdat %>%
+  filter(group %in% c("VUS", "Conflicting")) %>%
+  count(dataset, group, acmg_class) %>%
+  group_by(dataset, group) %>%
+  mutate(prop  = n / sum(n),
+         label = ifelse(prop >= thresh, as.character(n), ""))
+
+ggplot(combined_plotdat %>% filter(group %in% c("VUS", "Conflicting")),
+       aes(x = factor(group, levels = c("VUS", "Conflicting")), fill = acmg_class)) +
+  geom_bar(position = "fill") +
+  geom_text(
+    data = label_dat,
+    aes(y = prop, label = label),
+    position = position_fill(vjust = 0.5),
+    size = 3
+  ) +
+  scale_fill_manual(values = colours) +
+  labs(x = "ClinVar class", fill = "", y = "Proportion") +
+  coord_flip() +
+  facet_wrap(~ dataset, ncol = 1)
+```
+
+# All pathogenicity categories before and after somatic weighting
+
+```{r load-all-classes, message=FALSE}
+path_somatic <- read_tsv(
+  "../../Data/auto_ACMG_output/Clinvar_path_ACMG_somatic_240426.tsv",
+  show_col_types = FALSE
+) %>%
+  dplyr::select(all_of(acmg_cols)) %>%
+  mutate(group = "(likely) pathogenic")
+
+ben_somatic <- read_tsv(
+  "../../Data/auto_ACMG_output/Clinvar_benign_ACMG_somatic_240426.tsv",
+  show_col_types = FALSE
+) %>%
+  dplyr::select(all_of(acmg_cols)) %>%
+  mutate(group = "(likely) benign")
+
+all_dat_baseline <- bind_rows(
+  path %>% mutate(group = "(likely) pathogenic"),
+  ben  %>% mutate(group = "(likely) benign"),
+  vus
+) %>%
+  mutate(acmg_class = factor(acmg_class,
+                              levels = c("Benign", "Likely benign", "VUS",
+                                         "Likely pathogenic", "Pathogenic")))
+
+all_dat_somatic <- bind_rows(
+  path_somatic,
+  ben_somatic,
+  vus_somatic
+) %>%
+  mutate(acmg_class = factor(acmg_class,
+                              levels = c("Benign", "Likely benign", "VUS",
+                                         "Likely pathogenic", "Pathogenic")))
+```
+
+```{r plot-all-classes, fig.width=7, fig.height=3}
+combined_all <- bind_rows(
+  all_dat_baseline %>% mutate(dataset = "Auto ACMG outcome before somatic weighting"),
+  all_dat_somatic  %>% mutate(dataset = "Auto ACMG outcome after somatic weighting")
+) %>%
+  mutate(dataset = factor(dataset,
+                          levels = c("Auto ACMG outcome before somatic weighting",
+                                     "Auto ACMG outcome after somatic weighting")))
+
+# Export for Figures_for_somatic_germline_paper.Rmd
+write_csv(combined_all, "../../Data/auto_ACMG_output/ACMG_all_classes_before_after_somatic.csv")
+
+label_dat_all <- combined_all %>%
+  count(dataset, group, acmg_class) %>%
+  group_by(dataset, group) %>%
+  mutate(prop  = n / sum(n),
+         label = ifelse(prop >= 0.04, as.character(n), ""))
+
+ggplot(combined_all,
+       aes(x = factor(group, levels = c("(likely) benign", "VUS", "Conflicting",
+                                         "(likely) pathogenic")),
+           fill = acmg_class)) +
+  geom_bar(position = "fill") +
+  geom_text(
+    data = label_dat_all,
+    aes(y = prop, label = label),
+    position = position_fill(vjust = 0.5),
+    size = 3
+  ) +
+  scale_fill_manual(values = colours) +
+  labs(x = "ClinVar class", fill = "", y = "Proportion") +
+  coord_flip() +
+  facet_wrap(~ dataset, ncol = 1)
+```
+
+# Percentage of VUS reclassified by somatic weighting
+
+```{r vus-resolved}
+reclass_table <- vus %>%
+  dplyr::select(chrom, pos, ref, alt, acmg_class) %>%
+  dplyr::rename(acmg_class_before = acmg_class) %>%
+  left_join(vus_somatic %>% dplyr::select(chrom, pos, ref, alt, acmg_class),
+            by = c("chrom", "pos", "ref", "alt"))
+
+denominator <- reclass_table %>% filter(acmg_class_before == "VUS") %>% nrow()
+
+reclass_tab <- reclass_table %>%
+  filter(acmg_class_before == "VUS") %>%
+  count(acmg_class)
+
+reclass_tab
+
+pct_resolved <- reclass_tab %>%
+  filter(acmg_class != "VUS") %>%
+  summarise(pct = sum(n) / denominator * 100) %>%
+  pull(pct)
+
+cat("Percentage of auto-ACMG VUS reclassified by somatic weighting:", round(pct_resolved, 1), "%\n")
+```

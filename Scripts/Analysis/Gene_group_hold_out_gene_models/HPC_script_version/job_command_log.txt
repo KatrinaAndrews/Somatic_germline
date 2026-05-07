@@ -1,0 +1,2 @@
+module load HGI/softpack/users/ka13/Katrina_R26/1
+run-bsub "Rscript Gene_group_hold_out_LR_models_parallel.R" -m 32G -n 16 -q long

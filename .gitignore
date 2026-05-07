@@ -1,0 +1,14 @@
+# Track only Scripts/ — exclude Data/, Archived_scripts/, Manuscript/, and root-level files
+/*
+!.gitignore
+!/Scripts/
+
+# Exclude generated HTML outputs (knitted Rmd output)
+Scripts/**/*.html
+
+# macOS system files
+**/.DS_Store
+
+# HPC job log output files
+Scripts/**/*.e
+Scripts/**/*.o

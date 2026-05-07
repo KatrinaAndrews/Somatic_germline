@@ -1,0 +1,373 @@
+---
+title: "FGFR benchmarking: public data"
+output:
+  html_document:
+    df_print: paged
+    code_folding: hide
+  pdf_document: default
+date: "2026-02-20"
+---
+
+# Aim
+
+Determine the relative utility of MAVE data, somatic data and CEPs for clinical variant
+interpretation in FGFR proteins using TwinsUK sperm sequencing and 31k DNM cohort data.
+
+Subset to FGFR1-3 (FGFR4 is not a known DD gene and has no benchmarking data).
+
+FGFR1-4 MAVE: https://doi.org/10.1038/s41588-025-02431-8
+
+```{r, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(DT)
+library(janitor)
+library(patchwork)
+library(pROC)
+
+dir.create("../../Data/MAVE_benchmarking", recursive = TRUE, showWarnings = FALSE)
+
+palette1 <- c("#FF8080", "#804000", "#6699CC")
+
+fgfr_genes <- c("FGFR1", "FGFR2", "FGFR3")
+
+read_fgfr <- function(path) {
+  read_tsv(path, show_col_types = FALSE) %>%
+    filter(gene %in% fgfr_genes) %>%
+    dplyr::rename(
+      n_sperm             = n_sperm_twinsUK,
+      n_sperm_codon_count = n_sperm_twinsUK_codon_count
+    )
+}
+```
+
+```{r, message=FALSE, warning=FALSE}
+FGFR_MAVE <- read_csv(
+  "../../Data/MAVE/FGFR_MAVE_Diederichs/Diederichs_FGFR_supplement_2025.csv",
+  show_col_types = FALSE
+) %>%
+  clean_names() %>%
+  dplyr::select(fgfr, aa_mut, median_activation, category_activation, category_lof,
+                p_value_activation, q_value_activation, discovery_activation) %>%
+  dplyr::rename(gene = fgfr)
+
+DNMs_31k         <- read_fgfr("../../Data/Variant_lists/DNMs_31k_missense_annot_240426_public.tsv.gz")
+Clinvar_filt_path   <- read_fgfr("../../Data/Variant_lists/Clinvar_DDG2P_missense_path_annot_240426_public.tsv.gz")
+Clinvar_filt_vus    <- read_fgfr("../../Data/Variant_lists/Clinvar_DDG2P_missense_VUS_annot_240426_public.tsv.gz")
+Clinvar_filt_benign <- read_fgfr("../../Data/Variant_lists/Clinvar_DDG2P_missense_benign_annot_240426_public.tsv.gz")
+Biobank_benign      <- read_fgfr("../../Data/Variant_lists/Biobank_missense_variants_annot_240426_public.tsv.gz")
+
+# Raw ClinVar data to retrieve phenotype labels
+clinvar <- read_tsv(
+  "../../Data/Clinvar_060225/Clinvar_build_38_DDG2P_germline.tsv.gz",
+  show_col_types = FALSE
+)
+
+clinvar_FGFR <- clinvar %>% filter(GeneSymbol %in% fgfr_genes)
+
+clinvar_FGFR_path <- clinvar_FGFR %>%
+  filter(ClinicalSignificance %in%
+           c("Pathogenic", "Likely pathogenic", "Pathogenic/Likely pathogenic"))
+```
+
+```{r, message=FALSE, warning=FALSE}
+FGFR_MAVE_for_join <- FGFR_MAVE %>%
+  mutate(codon_change = str_replace(aa_mut, "([A-Z])([0-9]+)([A-Z])", "\\2\\1>\\2\\3")) %>%
+  dplyr::select(gene, codon_change, median_activation, p_value_activation, q_value_activation) %>%
+  group_by(gene, codon_change) %>%
+  summarise(
+    MAVE_activation    = max(median_activation),
+    p_value_activation = min(p_value_activation),
+    q_value_activation = min(q_value_activation),
+    .groups = "drop"
+  )
+
+benchmarking_dat <- bind_rows(
+  DNMs_31k            %>% mutate(source = "DNMs",              MutPred2_score = as.numeric(MutPred2_score)),
+  Clinvar_filt_path   %>% mutate(source = "Clinvar_pathogenic", MutPred2_score = as.numeric(MutPred2_score)),
+  Clinvar_filt_vus    %>% mutate(source = "Clinvar_VUS",        MutPred2_score = as.numeric(MutPred2_score)),
+  Clinvar_filt_benign %>% mutate(source = "Clinvar_benign",     MutPred2_score = as.numeric(MutPred2_score)),
+  Biobank_benign      %>% mutate(source = "Biobank_benign",     MutPred2_score = as.numeric(MutPred2_score))
+)
+
+benchmarking_dat_annot <- benchmarking_dat %>%
+  left_join(FGFR_MAVE_for_join, by = c("gene", "codon_change"))
+```
+
+Remove hypogonadism/anosmia entries (LOF phenotypes not applicable to GOF analysis):
+
+```{r}
+LOF_clinvar_IDs_to_remove <- clinvar_FGFR_path %>%
+  filter(str_detect(PhenotypeList, "hypog|Hypog|anosmia")) %>%
+  mutate(variant_ID = paste0("chr", Chromosome, "_", PositionVCF, "_",
+                              ReferenceAlleleVCF, "_", AlternateAlleleVCF)) %>%
+  pull(variant_ID)
+
+benchmarking_dat_annot_filt <- benchmarking_dat_annot %>%
+  mutate(variant_ID = paste(chrom, pos, ref, alt, sep = "_")) %>%
+  filter(!variant_ID %in% LOF_clinvar_IDs_to_remove) %>%
+  dplyr::select(-variant_ID)
+```
+
+# MAVE data summary categories
+
+```{r}
+FGFR_MAVE %>% count(category_activation, category_lof) %>% arrange(category_activation == "Neutral")
+```
+
+# MAVE coverage
+
+```{r}
+benchmarking_dat_annot %>%
+  count(source, MAVE_covered = !is.na(MAVE_activation)) %>%
+  pivot_wider(names_from = MAVE_covered, values_from = n,
+              names_prefix = "MAVE_") %>%
+  dplyr::rename(not_covered = MAVE_FALSE, covered = MAVE_TRUE) %>%
+  mutate(percent_covered = covered / (covered + not_covered) * 100)
+```
+
+## Coverage by gene
+
+```{r}
+benchmarking_dat_annot %>%
+  filter(source %in% c("Clinvar_pathogenic", "Biobank_benign")) %>%
+  group_by(gene, source) %>%
+  count(MAVE_covered = !is.na(MAVE_activation)) %>%
+  pivot_wider(names_from = MAVE_covered, values_from = n,
+              names_prefix = "MAVE_") %>%
+  dplyr::rename(not_covered = MAVE_FALSE, covered = MAVE_TRUE) %>%
+  mutate(percent_covered = covered / (covered + not_covered) * 100)
+```
+
+# MAVE vs ClinVar pathogenicity
+
+## Before LOF entries removed
+
+```{r}
+benchmarking_dat_annot %>%
+  filter(source %in% c("Clinvar_pathogenic", "Biobank_benign"),
+         !is.na(MAVE_activation)) %>%
+  ggplot(aes(x = source, y = MAVE_activation)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(width = 0.2, alpha = 0.7) +
+  scale_y_log10() +
+  theme_minimal() +
+  labs(title = "FGFR MAVE activation scores by ClinVar pathogenicity",
+       x = "", y = "MAVE activation")
+```
+
+## After LOF entries removed
+
+```{r}
+benchmarking_dat_annot_filt %>%
+  filter(source %in% c("Clinvar_pathogenic", "Biobank_benign"),
+         !is.na(MAVE_activation)) %>%
+  ggplot(aes(x = source, y = MAVE_activation)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(width = 0.2, alpha = 0.7) +
+  scale_y_log10() +
+  theme_minimal() +
+  labs(title = "FGFR MAVE activation scores (hypog/anosmia entries removed)",
+       x = "", y = "MAVE activation")
+```
+
+## DNMs vs Biobank
+
+```{r}
+benchmarking_dat_annot %>%
+  filter(source %in% c("DNMs", "Biobank_benign"), !is.na(MAVE_activation)) %>%
+  ggplot(aes(x = source, y = MAVE_activation)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(width = 0.2, alpha = 0.7) +
+  scale_y_log10() +
+  theme_minimal() +
+  labs(title = "FGFR MAVE activation scores: DNMs vs Biobank",
+       x = "", y = "MAVE activation")
+```
+
+# AUC: ClinVar pathogenic FGFR variants vs Biobank {.tabset}
+
+Three comparisons:
+1. ClinVar unfiltered (includes hypog/anosmia)
+2. ClinVar filtered to GOF variants
+3. ClinVar filtered to GOF, MAVE-covered variants only (like-for-like)
+
+```{r auc-helper}
+predictors <- c("AlphaMissense_score", "REVEL_score", "popEVE",
+                "CADD_raw", "PrimateAI_score",
+                "n_COSMIC", "n_COSMIC_codon_count",
+                "n_sperm", "n_sperm_codon_count",
+                "MAVE_activation")
+
+calc_roc_results <- function(df) {
+  results <- data.frame()
+  for (predictor in predictors) {
+    df_noNA <- df %>% filter(!is.na(.data[[predictor]]))
+    if (nrow(df_noNA) < 2 || n_distinct(df_noNA$label) < 2) next
+    roc_obj <- pROC::roc(response = df_noNA$label, predictor = df_noNA[[predictor]],
+                          levels = c(0, 1), direction = "<", quiet = TRUE)
+    ci_val <- ci.auc(roc_obj)
+    results <- rbind(results, data.frame(
+      Predictor = predictor,
+      AUC      = as.numeric(auc(roc_obj)),
+      CI_lower = round(ci_val[1], 4),
+      CI_upper = round(ci_val[3], 4)
+    ))
+  }
+  results
+}
+
+prep_roc_df <- function(df) {
+  df %>%
+    mutate(label = case_when(
+      source == "Clinvar_pathogenic" ~ 1,
+      source == "Biobank_benign"     ~ 0,
+      TRUE ~ NA_real_
+    )) %>%
+    mutate(label = factor(label, levels = c(0, 1))) %>%
+    mutate(across(all_of(predictors), as.numeric)) %>%
+    mutate(popEVE = -popEVE)
+}
+```
+
+```{r compute-aucs, warning=FALSE}
+roc_clinvar_1 <- benchmarking_dat_annot %>%
+  filter(source %in% c("Clinvar_pathogenic", "Biobank_benign")) %>%
+  prep_roc_df()
+
+roc_clinvar_2 <- benchmarking_dat_annot_filt %>%
+  filter(source %in% c("Clinvar_pathogenic", "Biobank_benign")) %>%
+  prep_roc_df()
+
+roc_clinvar_3 <- benchmarking_dat_annot_filt %>%
+  filter(!is.na(MAVE_activation),
+         source %in% c("Clinvar_pathogenic", "Biobank_benign")) %>%
+  prep_roc_df()
+
+roc_results_1 <- calc_roc_results(roc_clinvar_1)
+roc_results_2 <- calc_roc_results(roc_clinvar_2)
+roc_results_3 <- calc_roc_results(roc_clinvar_3)
+```
+
+## Split by dataset {.tabset}
+
+### Unique form data
+
+```{r, fig.height=4, fig.width=10}
+plot_dat <- bind_rows(
+  roc_results_1 %>% mutate(Dataset = "ClinVar unfiltered"),
+  roc_results_2 %>% mutate(Dataset = "ClinVar filtered to GOF"),
+  roc_results_3 %>% mutate(Dataset = "ClinVar filtered to GOF, MAVE-covered only")
+)
+
+plot_dat %>%
+  mutate(fill_factor = case_when(
+    Predictor %in% c("n_COSMIC", "n_COSMIC_codon_count",
+                     "n_sperm", "n_sperm_codon_count") ~ "Somatic data",
+    Predictor == "MAVE_activation"                      ~ "Functional data (MAVE)",
+    TRUE ~ "Computational predictors"
+  )) %>%
+  mutate(Predictor = factor(Predictor, levels = predictors)) %>%
+  ggplot(aes(x = Predictor, y = AUC, color = fill_factor, shape = Dataset)) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = CI_lower, ymax = CI_upper), width = 0.2,
+                position = position_dodge(width = 0.5)) +
+  coord_flip() +
+  theme_minimal() +
+  labs(title = "AUC: ClinVar pathogenic FGFR variants vs Biobank",
+       x = "", y = "AUC") +
+  ylim(0, 1) +
+  theme(legend.title = element_blank()) +
+  scale_color_manual(values = palette1)
+```
+
+### Long form data
+
+Not done
+
+## Split by gene {.tabset}
+
+### Unique form data
+
+```{r, warning=FALSE}
+roc_results_by_gene <- lapply(setNames(fgfr_genes, fgfr_genes), function(g) {
+  roc_gene <- roc_clinvar_2 %>% filter(gene == g)
+  calc_roc_results(roc_gene) %>% mutate(Gene = g)
+})
+
+roc_results_by_gene_table <- bind_rows(roc_results_by_gene) %>%
+  mutate(Predictor = factor(Predictor, levels = predictors))
+```
+
+```{r, fig.height=4, fig.width=15}
+roc_results_by_gene_table %>%
+  mutate(fill_factor = case_when(
+    Predictor %in% c("n_COSMIC", "n_COSMIC_codon_count",
+                     "n_sperm", "n_sperm_codon_count") ~ "Somatic data",
+    Predictor == "MAVE_activation"                      ~ "Functional data (MAVE)",
+    TRUE ~ "Computational predictors"
+  )) %>%
+  ggplot(aes(x = Predictor, y = AUC, color = fill_factor)) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = CI_lower, ymax = CI_upper), width = 0.2) +
+  coord_flip() +
+  theme_minimal() +
+  labs(title = "AUC: ClinVar pathogenic FGFR (GOF) vs Biobank, by gene",
+       x = "", y = "AUC") +
+  ylim(0, 1) +
+  theme(legend.title = element_blank()) +
+  facet_wrap(~ Gene) +
+  scale_color_manual(values = palette1)
+```
+
+### Long form data
+
+```{r, warning=FALSE}
+roc_clinvar_long <- bind_rows(
+  benchmarking_dat_annot_filt %>% filter(source == "Biobank_benign"),
+  benchmarking_dat_annot_filt %>%
+    filter(source == "Clinvar_pathogenic") %>%
+    mutate(NumberSubmitters_clean = coalesce(NumberSubmitters_clean, 1L)) %>%
+    uncount(NumberSubmitters_clean, .remove = FALSE)
+) %>%
+  prep_roc_df()
+
+roc_results_by_gene_long <- lapply(setNames(fgfr_genes, fgfr_genes), function(g) {
+  roc_gene <- roc_clinvar_long %>% filter(gene == g)
+  calc_roc_results(roc_gene) %>% mutate(Gene = g)
+})
+
+roc_results_by_gene_table_long <- bind_rows(roc_results_by_gene_long) %>%
+  mutate(Predictor = factor(Predictor, levels = predictors))
+```
+
+```{r, fig.height=4, fig.width=15}
+roc_results_by_gene_table_long %>%
+  mutate(fill_factor = case_when(
+    Predictor %in% c("n_COSMIC", "n_COSMIC_codon_count",
+                     "n_sperm", "n_sperm_codon_count") ~ "Somatic data",
+    Predictor == "MAVE_activation"                      ~ "Functional data (MAVE)",
+    TRUE ~ "Computational predictors"
+  )) %>%
+  ggplot(aes(x = Predictor, y = AUC, color = fill_factor)) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = CI_lower, ymax = CI_upper), width = 0.2) +
+  coord_flip() +
+  theme_minimal() +
+  labs(title = "AUC: ClinVar pathogenic FGFR (GOF) vs Biobank, long form, by gene",
+       x = "", y = "AUC") +
+  ylim(0, 1) +
+  theme(legend.title = element_blank()) +
+  facet_wrap(~ Gene) +
+  scale_color_manual(values = palette1)
+```
+
+# Write out data
+
+```{r}
+write_csv(plot_dat,
+          "../../Data/MAVE_benchmarking/FGFR_MAVE_plot_dat_public_data.csv")
+write_csv(roc_results_by_gene_table,
+          "../../Data/MAVE_benchmarking/FGFR_MAVE_plot_split_gene_dat_public_data.csv")
+write_csv(roc_results_by_gene_table_long,
+          "../../Data/MAVE_benchmarking/FGFR_MAVE_plot_split_gene_LONG_public_data.csv")
+```
