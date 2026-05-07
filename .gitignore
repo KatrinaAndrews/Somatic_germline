@@ -1,6 +1,7 @@
-# Track only Scripts/ — exclude Data/, Archived_scripts/, Manuscript/, and root-level files
+# Track only Scripts/ and README — exclude Data/, Archived_scripts/, Manuscript/, and other root-level files
 /*
 !.gitignore
+!/README.md
 !/Scripts/
 
 # Exclude generated HTML outputs (knitted Rmd output)
