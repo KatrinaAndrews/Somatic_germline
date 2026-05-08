@@ -309,6 +309,94 @@ cat(
 
 ---
 
+# 4b. Individual gene LR models: somatic vs REVEL comparison
+
+```{r}
+# Single-feature: genes where any somatic codon count predictor beats REVEL
+# (somatic AUC lower CI > REVEL AUC upper CI, non-overlapping CIs)
+# Restricted to the 195 dominant DD somatic selection genes
+
+dominant_somatic_genes <- union(altfunc, union(lof, other))
+
+revel_sf <- gene_AUCs_individual_features %>%
+  filter(dataset == "clinvar_count_weighted", Predictor == "REVEL",
+         gene %in% dominant_somatic_genes) %>%
+  select(gene, AUC_revel_upper = AUC_full_upper)
+
+somatic_sf <- gene_AUCs_individual_features %>%
+  filter(dataset == "clinvar_count_weighted",
+         Predictor %in% c("n_COSMIC_codon_count",
+                          "n_sperm_codon_count",
+                          "n_buccal_codon_count"),
+         gene %in% dominant_somatic_genes) %>%
+  select(gene, Predictor, somatic_lower = AUC_full_lower)
+
+somatic_vs_revel <- somatic_sf %>%
+  left_join(revel_sf, by = "gene") %>%
+  mutate(beats_revel = !is.na(somatic_lower) & !is.na(AUC_revel_upper) &
+           somatic_lower > AUC_revel_upper)
+
+n_genes_with_revel_sf <- n_distinct(revel_sf$gene)
+
+n_somatic_beats_revel <- somatic_vs_revel %>%
+  group_by(gene) %>%
+  summarise(any_beats = any(beats_revel), .groups = "drop") %>%
+  filter(any_beats) %>%
+  nrow()
+
+cat(
+  "Dominant DD somatic selection genes (altfunc + lof + other):", length(dominant_somatic_genes), "\n",
+  "With REVEL AUC (clinvar count-weighted, ≥10 unique P/B variants):", n_genes_with_revel_sf, "\n",
+  "Where any somatic codon count predictor beats REVEL",
+  "(lower CI > upper CI of REVEL):", n_somatic_beats_revel, "\n"
+)
+```
+
+```{r}
+# Hold-out LR models (REVEL + somatic vs REVEL alone)
+# DeLong p < 0.05 = significant difference; direction determined by AUC_full vs AUC_cep_only
+
+lr_revel_test <- gene_AUCs_LR_model %>%
+  filter(dataset == "clinvar_count_weighted",
+         CEP == "REVEL",
+         test_or_train == "test",
+         gene %in% dominant_somatic_genes) %>%
+  mutate(auc_diff = AUC_full - AUC_cep_only,
+         sig      = delong_p_value < 0.05)
+
+n_lr_genes_tested <- nrow(lr_revel_test)
+
+n_sig_delong_uplift  <- sum(lr_revel_test$sig & lr_revel_test$auc_diff > 0)
+n_sig_delong_hurt    <- sum(lr_revel_test$sig & lr_revel_test$auc_diff < 0)
+n_nonsig             <- sum(!lr_revel_test$sig)
+
+# Gene group membership of genes where somatic hurts
+gene_group_map_lr <- lr_revel_test %>%
+  mutate(gene_group = case_when(
+    gene %in% RASopathies ~ "RASopathy",
+    gene %in% altfunc     ~ "AltFunc",
+    gene %in% lof         ~ "LOF",
+    gene %in% other       ~ "Other",
+    TRUE                  ~ "Unknown"
+  ))
+
+hurt_by_group <- gene_group_map_lr %>%
+  filter(sig, auc_diff < 0) %>%
+  count(gene_group, name = "n_hurt")
+
+cat(
+  "Dominant DD somatic selection genes with hold-out REVEL LR model test results",
+  "(clinvar count-weighted):", n_lr_genes_tested, "\n\n",
+  "Significant uplift   (DeLong p<0.05, combined AUC > REVEL):", n_sig_delong_uplift, "\n",
+  "Significant worsened (DeLong p<0.05, combined AUC < REVEL):", n_sig_delong_hurt,   "\n",
+  "Non-significant      (DeLong p>=0.05):                     ", n_nonsig,            "\n\n",
+  "Gene group breakdown of genes where somatic significantly hurts:\n"
+)
+print(hurt_by_group)
+```
+
+---
+
 # 5. VUS/conflicting variant resolution
 
 ```{r}

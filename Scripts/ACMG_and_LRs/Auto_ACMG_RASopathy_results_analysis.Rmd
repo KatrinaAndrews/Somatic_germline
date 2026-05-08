@@ -123,8 +123,6 @@ plot_vus_only <- ggplot(
 
 plot_vus_only
 
-ggsave("../../Data/Figures/auto_acmg_before_somatic_weight_vus.png",
-       plot = plot_vus_only, width = 8, height = 1.8, units = "in")
 ```
 
 # Auto-ACMG after somatic weighting
@@ -140,8 +138,6 @@ plot2 <- ggplot(vus_somatic,
 
 plot2
 
-ggsave("../../Data/Figures/Auto_ACMG_after_somatic_weighting.png",
-       plot2, width = 8, height = 1.8, units = "in")
 ```
 
 # VUS before vs after somatic weighting

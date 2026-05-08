@@ -132,11 +132,25 @@ LR <- read_csv("../../Data/LR_calculations/LR_table.csv")
 clinvar_vis     <- read_tsv("../../Data/Gene_vis/Clinvar_path_DDG2P_codingcsq_for_gene_vis.tsv.gz")
 COSMIC_vis      <- read_tsv("../../Data/Gene_vis/COSMIC_DDG2P_for_gene_vis.tsv.gz")
 DNMs_vis        <- read_tsv("../../Data/Gene_vis/DNM_list_for_gene_vis.tsv.gz")
-sperm_vis       <- read_tsv("../../Data/Gene_vis/Sperm_seq_for_gene_vis_190126.tsv.gz")
+sperm_vis       <- read_tsv("../../Data/Gene_vis/Sperm_seq_for_gene_vis_TwinsUK_only_190126.tsv.gz",
+                            show_col_types = FALSE) %>%
+  mutate(codon    = as.integer(stringr::str_extract(amino_acid_change, "^[0-9]+")),
+         missense = if_else(Consequence == "missense", "missense", "non_missense"))
 buccal_vis      <- read_tsv("../../Data/Gene_vis/Buccal_data_for_gene_visualisation_240426.tsv.gz")
 PTPN11_MAVE_vis <- read_csv("../../Data/MAVE/PTPN11_MAVE_Jiang_2025/PTPN11_MAVE_SHP2_FL_41467_2025_60641_MOESM8_ESM.csv") %>%
   clean_names() %>%
   dplyr::select(wt, pos, mut, enrichment_ave)
+
+PTPN11_AM_vis <- read_tsv("../../Data/Alpha_missense/AlphaMissense_hg38_PTPN11.tsv",
+                           show_col_types = FALSE) %>%
+  rename(CHROM = 1) %>%
+  transmute(
+    codon  = as.integer(stringr::str_extract(protein_variant, "[0-9]+")),
+    alt_aa = stringr::str_extract(protein_variant, "[A-Za-z*]$"),
+    alt_aa = if_else(alt_aa == "*", "stop", alt_aa),
+    am_pathogenicity
+  ) %>%
+  filter(!is.na(codon))
 ```
 
 ```{r, warning=FALSE, message=FALSE}
@@ -459,8 +473,66 @@ mave_heatmap_plot <- function(MAVE_gene, max_codon) {
           legend.position = "right")
 }
 
+alphamissense_heatmap_plot <- function(AM_data, max_codon) {
+  am_plot_df <- AM_data %>%
+    group_by(codon, alt_aa) %>%
+    summarise(am_pathogenicity = mean(am_pathogenicity, na.rm = TRUE), .groups = "drop") %>%
+    transmute(codon, mut = factor(alt_aa, levels = rev(aa_levels_mave)), am_pathogenicity) %>%
+    tidyr::complete(codon = seq_len(max_codon),
+                    mut = factor(rev(aa_levels_mave), levels = rev(aa_levels_mave)))
+
+  ggplot(am_plot_df, aes(x = codon, y = mut, fill = am_pathogenicity)) +
+    geom_tile(height = 0.95, width = 0.95) +
+    xlab("Codon") + ylab(NULL) +
+    xaxis_codons(max_codon) +
+    scale_fill_gradient(low = "white", high = "#B2182B",
+                        limits = c(0, 1), na.value = "grey80",
+                        name = "AM score") +
+    theme_bw() +
+    theme(panel.grid = element_blank(),
+          panel.background = element_rect(fill = "grey80"),
+          axis.text.y = element_blank(),
+          axis.ticks.y = element_blank(), axis.title.y = element_blank(),
+          legend.position = "right")
+}
+
+mave_bar_plot <- function(MAVE_gene, max_codon) {
+  mave_bar_df <- MAVE_gene %>%
+    group_by(pos) %>%
+    summarise(enrichment_sum = sum(enrichment_ave, na.rm = TRUE), .groups = "drop")
+
+  ggplot(mave_bar_df, aes(x = pos, y = enrichment_sum)) +
+    geom_col(aes(fill = enrichment_sum > 0), width = 1, show.legend = FALSE) +
+    scale_fill_manual(values = c("TRUE" = "#B2182B", "FALSE" = "#2166AC")) +
+    geom_hline(yintercept = 0, linewidth = 0.3, colour = "grey40") +
+    scale_y_continuous(labels = scales::label_number(accuracy = 1)) +
+    xlab("Codon") + ylab(NULL) +
+    xaxis_codons(max_codon) +
+    theme_bw() +
+    theme(axis.title.y = element_blank(), legend.position = "none")
+}
+
+alphamissense_bar_plot <- function(AM_data, max_codon) {
+  am_bar_df <- AM_data %>%
+    group_by(codon) %>%
+    summarise(am_sum = sum(am_pathogenicity, na.rm = TRUE), .groups = "drop")
+
+  ggplot(am_bar_df, aes(x = codon, y = am_sum)) +
+    geom_col(width = 1, fill = "#B2182B") +
+    scale_y_continuous(labels = scales::label_number(accuracy = 1)) +
+    xlab("Codon") + ylab(NULL) +
+    xaxis_codons(max_codon) +
+    theme_bw() +
+    theme(axis.title.y = element_blank(), legend.position = "none")
+}
+
 generate_ptpn11_mave_panel <- function(gene_symbol, clinvar, COSMIC, DNMs, sperm, MAVE,
+                                       AlphaMissense = NULL,
+                                       am_style   = c("heatmap", "bar"),
+                                       mave_style = c("heatmap", "bar"),
                                        panel_labels = c("left", "none")) {
+  am_style   <- match.arg(am_style)
+  mave_style <- match.arg(mave_style)
   panel_labels <- match.arg(panel_labels)
   missense_colors_local <- c("missense" = "#882255", "non_missense" = "#6699CC")
 
@@ -475,7 +547,9 @@ generate_ptpn11_mave_panel <- function(gene_symbol, clinvar, COSMIC, DNMs, sperm
     ifelse(nrow(COSMIC_gene)  > 0, max(COSMIC_gene$codon,  na.rm = TRUE), -Inf),
     ifelse(nrow(DNMs_gene)    > 0, max(DNMs_gene$codon,    na.rm = TRUE), -Inf),
     ifelse(nrow(Sperm_gene)   > 0, max(Sperm_gene$codon,   na.rm = TRUE), -Inf),
-    ifelse(nrow(MAVE_gene)    > 0, max(MAVE_gene$pos,      na.rm = TRUE), -Inf)
+    ifelse(nrow(MAVE_gene)    > 0, max(MAVE_gene$pos,      na.rm = TRUE), -Inf),
+    ifelse(!is.null(AlphaMissense) && nrow(AlphaMissense) > 0,
+           max(AlphaMissense$codon, na.rm = TRUE), -Inf)
   ), na.rm = TRUE))
   if (!is.finite(max_codon) || is.na(max_codon) || max_codon <= 0) max_codon <- 1
 
@@ -500,18 +574,47 @@ generate_ptpn11_mave_panel <- function(gene_symbol, clinvar, COSMIC, DNMs, sperm
   dnm_plot     <- make_bar(DNMs_gene,    "codon", "n_DNM")
   cosmic_plot  <- make_bar(COSMIC_gene,  "codon", "n_COSMIC")
   sperm_plot   <- make_bar(Sperm_gene,   "codon", "n_sperm")
-  MAVE_plot    <- mave_heatmap_plot(MAVE_gene, max_codon) +
+  MAVE_plot    <- (if (mave_style == "bar") mave_bar_plot(MAVE_gene, max_codon)
+                   else mave_heatmap_plot(MAVE_gene, max_codon)) +
     theme(plot.margin = margin(t = 5.5, r = 5.5, b = 5.5, l = 18))
 
-  labels <- c("n ClinVar P/LP", "n DNM", "n COSMIC", "n Sperm nanoseq", "MAVE")
+  labels <- c(
+    "n ClinVar P/LP", "n DNM", "n COSMIC", "n Sperm nanoseq",
+    if (mave_style == "bar") "MAVE score sum" else "MAVE",
+    if (am_style   == "bar") "AlphaMissense score sum" else "AlphaMissense"
+  )
 
-  if (panel_labels == "left") {
+  if (!is.null(AlphaMissense)) {
+    AM_plot <- if (am_style == "bar") {
+      alphamissense_bar_plot(AlphaMissense, max_codon)
+    } else {
+      alphamissense_heatmap_plot(AlphaMissense, max_codon)
+    }
+    AM_plot <- AM_plot +
+      theme(plot.margin = margin(t = 5.5, r = 5.5, b = 5.5, l = 18))
+    sw <- max(0.26, max(nchar(labels)) / 15 * 0.26)
+    if (panel_labels == "left") {
+      combined_plots <-
+        left_labeled_panel(clinvar_plot, labels[1], strip_width = sw) /
+        left_labeled_panel(dnm_plot,     labels[2], strip_width = sw) /
+        left_labeled_panel(cosmic_plot,  labels[3], strip_width = sw) /
+        left_labeled_panel(sperm_plot,   labels[4], strip_width = sw) /
+        left_labeled_panel(MAVE_plot,    labels[5], strip_width = sw) /
+        left_labeled_panel(AM_plot,      labels[6], strip_width = sw) +
+        plot_layout(heights = c(1, 1, 1, 1, 1.3, 1.3))
+    } else {
+      combined_plots <-
+        clinvar_plot / dnm_plot / cosmic_plot / sperm_plot / MAVE_plot / AM_plot +
+        plot_layout(heights = c(1, 1, 1, 1, 1.3, 1.3))
+    }
+  } else if (panel_labels == "left") {
+    sw <- max(0.26, max(nchar(labels[1:5])) / 15 * 0.26)
     combined_plots <-
-      left_labeled_panel(clinvar_plot, labels[1]) /
-      left_labeled_panel(dnm_plot,     labels[2]) /
-      left_labeled_panel(cosmic_plot,  labels[3]) /
-      left_labeled_panel(sperm_plot,   labels[4]) /
-      left_labeled_panel(MAVE_plot,    labels[5]) +
+      left_labeled_panel(clinvar_plot, labels[1], strip_width = sw) /
+      left_labeled_panel(dnm_plot,     labels[2], strip_width = sw) /
+      left_labeled_panel(cosmic_plot,  labels[3], strip_width = sw) /
+      left_labeled_panel(sperm_plot,   labels[4], strip_width = sw) /
+      left_labeled_panel(MAVE_plot,    labels[5], strip_width = sw) +
       plot_layout(heights = c(1, 1, 1, 1, 1.3))
   } else {
     combined_plots <-
@@ -710,7 +813,7 @@ p_heat <- ggplot() +
   facet_grid(facet_panel ~ ., scales = "free_y", space = "free_y") +
   theme(strip.placement = "outside", strip.text.y = element_blank(), strip.background = element_blank())
 
-table_facet_levels     <- c("Altered function genes","Loss of function genes","Other dominant cancer-DD genes","All DD genes")
+table_facet_levels     <- facet_levels
 table_gene_group_levels <- gene_group_levels
 
 counts_df <- gene_table %>%
@@ -818,18 +921,81 @@ ggsave("../../Data/Figures/Final/MAVE_Vs_somatic_data_plot.png", width = 12, hei
 
 ## Figure 3b: PTPN11 mutation frequency and MAVE enrichment
 
-```{r, fig.width=8, fig.height=8, warning=FALSE, message=FALSE}
+```{r, fig.width=8, fig.height=10, warning=FALSE, message=FALSE}
 fig3b <- generate_ptpn11_mave_panel(
-  gene_symbol  = "PTPN11",
-  clinvar      = clinvar_vis,
-  COSMIC       = COSMIC_vis,
-  DNMs         = DNMs_vis,
-  sperm        = sperm_vis,
-  MAVE         = PTPN11_MAVE_vis,
-  panel_labels = "left"
+  gene_symbol   = "PTPN11",
+  clinvar       = clinvar_vis,
+  COSMIC        = COSMIC_vis,
+  DNMs          = DNMs_vis,
+  sperm         = sperm_vis,
+  MAVE          = PTPN11_MAVE_vis,
+  AlphaMissense = PTPN11_AM_vis,
+  panel_labels  = "left"
 )
 fig3b
-ggsave("../../Data/Figures/Final/PTPN11_MAVE_codon_plot.png", fig3b, width = 8, height = 8, dpi = 300)
+```
+
+## Figure 3b: PTPN11 mutation frequency (bar plot summary)
+
+```{r, fig.width=6, fig.height=6, warning=FALSE, message=FALSE}
+panel_levels <- c("n ClinVar P/LP", "n DNM", "n COSMIC",
+                  "n Sperm nanoseq", "MAVE score sum", "AlphaMissense score sum")
+
+ptpn11_bar_df <- bind_rows(
+  clinvar_vis %>% filter(gene == "PTPN11") %>%
+    group_by(codon) %>% summarise(value = sum(NumberSubmitters, na.rm = TRUE), .groups = "drop") %>%
+    mutate(panel = "n ClinVar P/LP"),
+  DNMs_vis %>% filter(gene == "PTPN11") %>%
+    group_by(codon) %>% summarise(value = sum(n_DNM, na.rm = TRUE), .groups = "drop") %>%
+    mutate(panel = "n DNM"),
+  COSMIC_vis %>% filter(gene == "PTPN11") %>%
+    group_by(codon) %>% summarise(value = sum(n_COSMIC, na.rm = TRUE), .groups = "drop") %>%
+    mutate(panel = "n COSMIC"),
+  sperm_vis %>% filter(gene == "PTPN11") %>%
+    group_by(codon) %>% summarise(value = sum(n_sperm, na.rm = TRUE), .groups = "drop") %>%
+    mutate(panel = "n Sperm nanoseq"),
+  PTPN11_MAVE_vis %>%
+    group_by(codon = pos) %>%
+    summarise(value = sum(enrichment_ave, na.rm = TRUE), .groups = "drop") %>%
+    mutate(panel = "MAVE score sum"),
+  PTPN11_AM_vis %>%
+    group_by(codon) %>% summarise(value = sum(am_pathogenicity, na.rm = TRUE), .groups = "drop") %>%
+    mutate(panel = "AlphaMissense score sum")
+) %>%
+  mutate(
+    panel    = factor(panel, levels = panel_levels),
+    fill_col = case_when(
+      panel == "MAVE score sum" & value > 0  ~ "mave_pos",
+      panel == "MAVE score sum" & value <= 0 ~ "mave_neg",
+      TRUE ~ "count"
+    )
+  )
+
+hline_df <- tibble(panel = factor("MAVE score sum", levels = panel_levels), yintercept = 0)
+
+max_codon_bar <- max(ptpn11_bar_df$codon, na.rm = TRUE)
+
+fig3b_bar <- ggplot(ptpn11_bar_df, aes(x = codon, y = value, fill = fill_col, colour = fill_col)) +
+  geom_col(width = 1, linewidth = 0.25) +
+  geom_hline(data = hline_df, aes(yintercept = yintercept),
+             linewidth = 0.3, colour = "grey40", inherit.aes = FALSE) +
+  scale_fill_manual(values = c("count" = "#882255", "mave_pos" = "#B2182B",
+                               "mave_neg" = "#2166AC"), guide = "none") +
+  scale_colour_manual(values = c("count" = "#882255", "mave_pos" = "#B2182B",
+                                 "mave_neg" = "#2166AC"), guide = "none") +
+  scale_x_continuous(limits = c(0, max_codon_bar + 20),
+                     breaks = seq(0, max_codon_bar + 20, by = 100)) +
+  scale_y_continuous(labels = scales::label_number(accuracy = 1)) +
+  facet_wrap(~panel, ncol = 1, scales = "free_y") +
+  labs(x = "Codon", y = NULL, title = "PTPN11") +
+  theme_bw() +
+  theme(strip.text = element_text(face = "bold", hjust = 0),
+        strip.background = element_blank(),
+        panel.grid.minor = element_blank())
+
+fig3b_bar
+ggsave("../../Data/Figures/Final/PTPN11_MAVE_codon_plot.png", fig3b_bar,
+       width = 6, height = 6, dpi = 300)
 ```
 
 ## Figure 4: Somatic data utility in RASopathy VCEP genes
@@ -844,7 +1010,7 @@ ggsave("../../Data/Figures/Final/RASopathy_genes_clinvar_long_panel_heatmap.png"
 
 ```{r, fig.width=9, fig.height=5}
 LR_edit %>%
-  filter(data_set == "clinvar_unique_public", !threshold == "1-4",
+  filter(data_set == "clinvar_long_public", !threshold == "1-4",
          !gene_group == "Macrocephaly genes",
          feature == "n_COSMIC_codon_count") %>%
   dplyr::arrange(gene_group, sensitivity) %>%
