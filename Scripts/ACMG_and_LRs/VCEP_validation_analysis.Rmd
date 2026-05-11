@@ -1,0 +1,486 @@
+---
+title: "VCEP validation: auto-ACMG vs RASopathy VCEP expert classifications"
+output:
+  html_document:
+    df_print: paged
+    code_folding: hide
+date: "2026-05-11"
+---
+
+# Aim
+
+Run the 404 RASopathy VCEP-classified variants through the auto-ACMG pipeline
+(baseline and somatic-weighted) and compare the criteria applied by the pipeline
+against those applied by the VCEP.
+
+Expected discrepancy categories:
+- **Codes only VCEP can apply**: PS3 (functional), PS4 (case count), PM5 (same codon
+  different AA), PM6 (assumed de novo), PP1 (segregation), BS2, BS4, BP5, BP7
+- **Strength discrepancies (VCEP stronger)**: PS2 (I apply moderate; VCEP uses
+  Very Strong / Strong for multiple confirmed de novos)
+- **PM2 weight**: VCEP uses PM2_Supporting; my pipeline applies PM2 at Moderate weight
+- **PP2**: I restrict to BRAF/MAP2K1/PTPN11; check VCEP application
+- **Codes I should apply but miss**: investigate any systematic gap in BA1/BS1/PP3/BP4/PM2
+
+```{r setup, message=FALSE}
+library(tidyverse)
+
+RASopathies <- read_csv("../../Data/Gene_definitions/RASopathy_genes_VCEP_030425.csv",
+                        show_col_types = FALSE) %>% pull(gene)
+
+pp2_genes <- c("BRAF", "MAP2K1", "PTPN11")
+
+hotspots_path <- "../../Data/RASopathy_VCEP/rasopathy_hotspots.tsv"
+input_path    <- "../../Data/auto_ACMG_output/VCEP_variants_acmg_input.tsv"
+output_base   <- "../../Data/auto_ACMG_output/VCEP_variants_ACMG_baseline.tsv"
+output_somatic <- "../../Data/auto_ACMG_output/VCEP_variants_ACMG_somatic.tsv"
+```
+
+# 1. Prepare auto-ACMG input for VCEP variants
+
+```{r prepare-input, message=FALSE}
+vcep_raw <- read_csv(
+  "../../Data/RASopathy_VCEP/RASopathy_VCEP_classified_variants_110526.csv",
+  show_col_types = FALSE
+) %>%
+  rename(clinvar_id = `ClinVar Id`, met_codes = `Met Codes`,
+         vcep_class = Classification)
+
+# --- Genomic coordinates from ClinVar VariationID ---
+clinvar_coords <- read_tsv(
+  "../../Data/Clinvar_060225/Clinvar_build_38_DDG2P.tsv.gz",
+  show_col_types = FALSE
+) %>%
+  select(VariationID, Chromosome, PositionVCF, ReferenceAlleleVCF,
+         AlternateAlleleVCF, Origin, GeneSymbol) %>%
+  mutate(
+    chrom             = paste0("chr", Chromosome),
+    de_novo_confirmed = grepl("de novo", Origin, ignore.case = TRUE)
+  ) %>%
+  select(-Chromosome, -Origin)
+
+vcep_coords <- vcep_raw %>%
+  left_join(clinvar_coords, by = c("clinvar_id" = "VariationID"))
+
+cat("Matched to genomic coords:", sum(!is.na(vcep_coords$chrom)), "/", nrow(vcep_coords), "\n")
+cat("Unmatched ClinVar IDs:", vcep_coords$clinvar_id[is.na(vcep_coords$chrom)], "\n")
+
+vcep_matched <- vcep_coords %>%
+  filter(!is.na(chrom), GeneSymbol %in% RASopathies) %>%
+  mutate(
+    pos = as.integer(PositionVCF),
+    ref = ReferenceAlleleVCF,
+    alt = AlternateAlleleVCF
+  )
+
+cat("Variants in 12 RASopathy genes:", nrow(vcep_matched), "\n")
+cat("\nGene distribution:\n")
+print(count(vcep_matched, GeneSymbol, vcep_class))
+```
+
+```{r join-annotations, message=FALSE, warning=FALSE}
+# --- Join REVEL, somatic counts from all three annotated variant files ---
+read_annot <- function(path) {
+  read_tsv(path, show_col_types = FALSE) %>%
+    filter(gene %in% RASopathies) %>%
+    rename(n_sperm_codon_count = n_sperm_twinsUK_codon_count) %>%
+    select(chrom, pos, ref, alt, gene, transcript, consequence,
+           codon_change, codon,
+           revel = REVEL_score,
+           n_COSMIC_codon_count, n_sperm_codon_count)
+}
+
+annot_all <- bind_rows(
+  read_annot("../../Data/Variant_lists/Clinvar_DDG2P_missense_path_annot_240426_public.tsv.gz"),
+  read_annot("../../Data/Variant_lists/Clinvar_DDG2P_missense_benign_annot_240426_public.tsv.gz"),
+  read_annot("../../Data/Variant_lists/Clinvar_DDG2P_missense_VUS_annot_240426_public.tsv.gz")
+) %>%
+  mutate(revel = suppressWarnings(as.numeric(revel))) %>%
+  distinct(chrom, pos, ref, alt, .keep_all = TRUE)
+
+# --- gnomAD popmax AF from all three gnomAD/CADD files ---
+read_gnomad <- function(fname) {
+  read_tsv(
+    file.path("../../Data/Variant_lists/gnomad_CADD", fname),
+    col_names = c("chrom", "pos", "ref", "alt", "gnomad_popmax_af", "cadd_phred"),
+    show_col_types = FALSE
+  ) %>%
+    mutate(
+      gnomad_popmax_af = suppressWarnings(
+        as.numeric(if_else(gnomad_popmax_af == ".", "0", gnomad_popmax_af))
+      ),
+      chrom = paste0("chr", chrom)
+    )
+}
+
+gnomad_all <- bind_rows(
+  read_gnomad("Clinvar_DDG2P_missense_path_gnomad_popmax_CADD_Phred.tsv"),
+  read_gnomad("Clinvar_DDG2P_missense_benign_gnomad_popmax_CADD_Phred.tsv"),
+  read_gnomad("Clinvar_DDG2P_missense_VUS_gnomad_popmax_CADD_Phred.tsv")
+) %>%
+  distinct(chrom, pos, ref, alt, .keep_all = TRUE)
+
+# --- Join everything ---
+vcep_input <- vcep_matched %>%
+  left_join(annot_all,  by = c("chrom", "pos", "ref", "alt")) %>%
+  left_join(gnomad_all, by = c("chrom", "pos", "ref", "alt")) %>%
+  # somatic evidence codes (same logic as Prep_data_for_Auto_ACMG.Rmd)
+  mutate(
+    pathogenic_somatic_supporting = FALSE,
+    benign_somatic_supporting     = n_COSMIC_codon_count == 0,
+    pathogenic_somatic_moderate   = n_COSMIC_codon_count > 2,
+    pathogenic_somatic_strong     = n_COSMIC_codon_count > 10,
+    # PS1 set FALSE to avoid circularity with VCEP's own submission
+    clinvar_exact_path_star2plus  = FALSE,
+    gnomad_min_cov                = NA_character_,
+    gene                          = GeneSymbol
+  ) %>%
+  # fill missing annotation columns required by ACMG_auto.R
+  mutate(
+    consequence = coalesce(consequence, "missense_variant"),
+    codon       = coalesce(as.character(codon), NA_character_)
+  )
+
+cat("Annotation coverage (all matched variants):\n")
+cat("  REVEL score present:          ", sum(!is.na(vcep_input$revel)),
+    "/", nrow(vcep_input), "\n")
+cat("  gnomAD AF present:            ", sum(!is.na(vcep_input$gnomad_popmax_af)),
+    "/", nrow(vcep_input), "\n")
+cat("  COSMIC codon count present:   ", sum(!is.na(vcep_input$n_COSMIC_codon_count)),
+    "/", nrow(vcep_input), "\n")
+cat("  de_novo_confirmed TRUE:       ", sum(vcep_input$de_novo_confirmed, na.rm = TRUE), "\n\n")
+
+# Restrict to variants with full annotation (gnomAD AF + REVEL + COSMIC present).
+# The 140 missing-annotation variants are almost all benign/likely benign variants
+# classified by the VCEP via BA1/BS1 population frequency — they are not in the
+# ClinVar annotated files because they were not previously classified in ClinVar.
+# Running them through the pipeline without gnomAD AF causes spurious PM2 firing
+# and missed BA1/BS1, making the comparison misleading.
+vcep_input_annotated <- vcep_input %>% filter(!is.na(gnomad_popmax_af))
+
+cat("Restricting to fully-annotated variants:", nrow(vcep_input_annotated), "\n")
+cat("Excluded (missing annotation):          ", nrow(vcep_input) - nrow(vcep_input_annotated), "\n")
+cat("Excluded by VCEP class:\n")
+print(vcep_input %>% filter(is.na(gnomad_popmax_af)) %>% count(vcep_class))
+
+write_tsv(vcep_input_annotated, input_path)
+
+# Use only annotated variants for all downstream comparisons
+vcep_matched <- vcep_input_annotated
+```
+
+# 2. Run auto-ACMG (baseline and somatic)
+
+```{r run-acmg}
+system(paste("Rscript ../../Scripts/ACMG_and_LRs/ACMG_auto.R",
+             input_path, hotspots_path, output_base))
+
+system(paste("Rscript ../../Scripts/ACMG_and_LRs/ACMG_auto_somatic.R",
+             input_path, hotspots_path, output_somatic))
+
+acmg_base   <- read_tsv(output_base,   show_col_types = FALSE)
+acmg_somatic <- read_tsv(output_somatic, show_col_types = FALSE)
+
+cat("Baseline output rows:       ", nrow(acmg_base), "\n")
+cat("Somatic-weighted output rows:", nrow(acmg_somatic), "\n")
+```
+
+# 3. Parse criteria
+
+```{r parse-criteria}
+# Parse VCEP Met Codes into tidy long form
+# Each code may have a strength suffix, e.g. "PS2_Very Strong", "PM2_Supporting", "PP3"
+parse_vcep_codes <- function(codes_str) {
+  str_split(codes_str, ",\\s*")[[1]] %>%
+    str_trim() %>%
+    tibble(raw = .) %>%
+    mutate(
+      # Separate base code from strength descriptor
+      code     = str_extract(raw, "^[A-Z0-9]+"),
+      strength = str_remove(raw, "^[A-Z0-9]+_?") %>% str_trim() %>% na_if("")
+    ) %>%
+    filter(!is.na(code))
+}
+
+vcep_long <- vcep_matched %>%
+  select(chrom, pos, ref, alt, vcep_class, met_codes) %>%
+  mutate(rn = row_number()) %>%
+  rowwise() %>%
+  mutate(parsed = list(parse_vcep_codes(met_codes))) %>%
+  ungroup() %>%
+  unnest(parsed)
+
+# Parse auto-ACMG criteria_met (semicolon-separated)
+acmg_long_base <- acmg_base %>%
+  select(chrom, pos, ref, alt, acmg_class, criteria_met) %>%
+  separate_rows(criteria_met, sep = ";") %>%
+  rename(code = criteria_met) %>%
+  filter(code != "None", !is.na(code))
+
+acmg_long_somatic <- acmg_somatic %>%
+  select(chrom, pos, ref, alt, acmg_class, criteria_met) %>%
+  separate_rows(criteria_met, sep = ";") %>%
+  rename(code = criteria_met) %>%
+  filter(code != "None", !is.na(code))
+```
+
+# 4. Overall classification agreement
+
+```{r classification-agreement}
+# Standardise class labels
+std_class <- function(x) {
+  case_when(
+    x %in% c("Pathogenic", "Likely Pathogenic")           ~ "LP/P",
+    x %in% c("Benign", "Likely Benign")                   ~ "LB/B",
+    x %in% c("Uncertain Significance", "VUS")             ~ "VUS",
+    x == "Likely pathogenic"                               ~ "LP/P",
+    x == "Likely benign"                                   ~ "Likely benign",
+    TRUE ~ x
+  )
+}
+
+compare_class <- vcep_matched %>%
+  select(chrom, pos, ref, alt, vcep_class) %>%
+  left_join(acmg_base   %>% select(chrom, pos, ref, alt, auto_class_base   = acmg_class),
+            by = c("chrom","pos","ref","alt")) %>%
+  left_join(acmg_somatic %>% select(chrom, pos, ref, alt, auto_class_somatic = acmg_class),
+            by = c("chrom","pos","ref","alt")) %>%
+  mutate(
+    vcep_std   = std_class(vcep_class),
+    base_std   = std_class(auto_class_base),
+    somatic_std = std_class(auto_class_somatic),
+    agree_base   = vcep_std == base_std,
+    agree_somatic = vcep_std == somatic_std
+  )
+
+cat("Classification agreement — baseline auto-ACMG vs VCEP:\n")
+print(compare_class %>% count(vcep_std, base_std) %>% arrange(vcep_std))
+
+cat("\nOverall agreement (exact match):", round(100 * mean(compare_class$agree_base), 1), "%\n")
+cat("Agreement after somatic weighting:", round(100 * mean(compare_class$agree_somatic), 1), "%\n")
+```
+
+# 5. Code-by-code discrepancy analysis {.tabset}
+
+```{r code-summary}
+# For each ACMG code, count:
+#   both_apply   — VCEP fires it AND I fire it
+#   vcep_only    — VCEP fires it, I don't
+#   mine_only    — I fire it, VCEP doesn't
+
+# Use a per-variant presence indicator
+var_key <- c("chrom","pos","ref","alt")
+
+vcep_codes_wide <- vcep_long %>%
+  distinct(chrom, pos, ref, alt, code) %>%
+  mutate(vcep = TRUE)
+
+mine_codes_wide <- acmg_long_base %>%
+  distinct(chrom, pos, ref, alt, code) %>%
+  mutate(mine = TRUE)
+
+code_compare <- full_join(vcep_codes_wide, mine_codes_wide,
+                          by = c(var_key, "code")) %>%
+  mutate(vcep = coalesce(vcep, FALSE),
+         mine = coalesce(mine, FALSE))
+
+code_summary <- code_compare %>%
+  group_by(code) %>%
+  summarise(
+    vcep_total  = sum(vcep),
+    mine_total  = sum(mine),
+    both_apply  = sum(vcep & mine),
+    vcep_only   = sum(vcep & !mine),
+    mine_only   = sum(!vcep & mine),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(vcep_total))
+
+cat("Code-level summary (baseline auto-ACMG vs VCEP):\n")
+print(code_summary, n = 50)
+```
+
+## Codes I apply but VCEP doesn't (over-application)
+
+```{r mine-only}
+mine_only_variants <- code_compare %>%
+  filter(!vcep, mine) %>%
+  left_join(vcep_matched %>% select(chrom, pos, ref, alt, vcep_class, met_codes),
+            by = var_key) %>%
+  left_join(acmg_base %>% select(chrom, pos, ref, alt, auto_class = acmg_class,
+                                  criteria_met),
+            by = var_key)
+
+cat("Variants where I fire a code the VCEP doesn't, by code:\n")
+mine_only_variants %>% count(code, sort = TRUE) %>% print()
+
+cat("\nDetails for each over-applied code:\n")
+for (cd in mine_only_variants %>% count(code) %>% arrange(desc(n)) %>% pull(code)) {
+  cat("\n---", cd, "---\n")
+  mine_only_variants %>%
+    filter(code == cd) %>%
+    select(gene = chrom, pos, ref, alt, vcep_class, met_codes, auto_class, criteria_met) %>%
+    print()
+}
+```
+
+## Codes VCEP applies but I don't (missed or inapplicable)
+
+```{r vcep-only}
+vcep_only_summary <- code_compare %>%
+  filter(vcep, !mine) %>%
+  count(code, sort = TRUE)
+
+cat("Codes VCEP applies that auto-ACMG does not, by frequency:\n")
+print(vcep_only_summary)
+```
+
+## Agreement on shared codes (both apply)
+
+```{r both-apply}
+cat("Codes where both VCEP and auto-ACMG fire:\n")
+code_summary %>%
+  filter(both_apply > 0) %>%
+  select(code, vcep_total, mine_total, both_apply, vcep_only, mine_only) %>%
+  print()
+```
+
+## Strength discrepancies for PS2
+
+```{r ps2-strength}
+# PS2: check VCEP strength vs my application (always moderate/PM)
+ps2_vcep <- vcep_long %>%
+  filter(code == "PS2") %>%
+  select(chrom, pos, ref, alt, vcep_class, vcep_strength = strength, raw_code = raw)
+
+ps2_mine <- acmg_long_base %>%
+  filter(code == "PS2") %>%
+  select(chrom, pos, ref, alt) %>%
+  mutate(mine_fires = TRUE)
+
+ps2_compare <- ps2_vcep %>%
+  left_join(ps2_mine, by = var_key) %>%
+  mutate(mine_fires = coalesce(mine_fires, FALSE))
+
+cat("VCEP PS2 strength distribution:\n")
+print(count(ps2_compare, vcep_strength, mine_fires))
+
+cat("\nVariants where VCEP applies PS2 but auto-ACMG doesn't:\n")
+ps2_compare %>%
+  filter(!mine_fires) %>%
+  left_join(vcep_matched %>% select(chrom, pos, ref, alt, met_codes), by = var_key) %>%
+  select(chrom, pos, ref, alt, vcep_class, raw_code, met_codes) %>%
+  print()
+```
+
+## PM2 weight discrepancy
+
+```{r pm2-weight}
+# VCEP applies PM2 at Supporting strength; auto-ACMG applies at Moderate weight
+pm2_vcep <- vcep_long %>%
+  filter(code == "PM2") %>%
+  count(strength, name = "n_vcep")
+
+cat("VCEP PM2 strength distribution:\n")
+print(pm2_vcep)
+
+cat("\nNote: auto-ACMG applies PM2 at Moderate weight (LR=4.33).\n")
+cat("VCEP uses PM2 at Supporting strength (LR=2.08).\n")
+cat("This means my pipeline over-weights PM2 by a factor of 4.33/2.08 = 2.1x.\n")
+
+pm2_agreement <- code_compare %>%
+  filter(code == "PM2") %>%
+  summarise(vcep_total = sum(vcep), mine_total = sum(mine),
+            both = sum(vcep & mine), vcep_only = sum(vcep & !mine),
+            mine_only = sum(!vcep & mine))
+cat("\nPM2 agreement:\n")
+print(pm2_agreement)
+```
+
+## PP2 application
+
+```{r pp2}
+pp2_vcep <- vcep_long %>%
+  filter(code == "PP2") %>%
+  left_join(vcep_matched %>% select(chrom, pos, ref, alt, gene = GeneSymbol),
+            by = var_key) %>%
+  count(gene, name = "vcep_n")
+
+pp2_mine <- acmg_long_base %>%
+  filter(code == "PP2") %>%
+  left_join(acmg_base %>% select(chrom, pos, ref, alt, gene),
+            by = var_key) %>%
+  count(gene, name = "mine_n")
+
+cat("PP2 application by gene (VCEP vs auto-ACMG):\n")
+full_join(pp2_vcep, pp2_mine, by = "gene") %>%
+  mutate(pp2_applicable_per_vcep = gene %in% pp2_genes) %>%
+  arrange(gene) %>%
+  print()
+```
+
+## BA1 / BS1 agreement
+
+```{r ba1-bs1}
+cat("BA1 agreement:\n")
+code_compare %>% filter(code == "BA1") %>%
+  summarise(vcep=sum(vcep), mine=sum(mine), both=sum(vcep&mine),
+            vcep_only=sum(vcep&!mine), mine_only=sum(!vcep&mine)) %>% print()
+
+cat("\nBS1 agreement:\n")
+code_compare %>% filter(code == "BS1") %>%
+  summarise(vcep=sum(vcep), mine=sum(mine), both=sum(vcep&mine),
+            vcep_only=sum(vcep&!mine), mine_only=sum(!vcep&mine)) %>% print()
+```
+
+## PP3 / BP4 agreement
+
+```{r pp3-bp4}
+cat("PP3 agreement:\n")
+code_compare %>% filter(code == "PP3") %>%
+  summarise(vcep=sum(vcep), mine=sum(mine), both=sum(vcep&mine),
+            vcep_only=sum(vcep&!mine), mine_only=sum(!vcep&mine)) %>% print()
+
+cat("\nBP4 agreement:\n")
+code_compare %>% filter(code == "BP4") %>%
+  summarise(vcep=sum(vcep), mine=sum(mine), both=sum(vcep&mine),
+            vcep_only=sum(vcep&!mine), mine_only=sum(!vcep&mine)) %>% print()
+
+# Variants where PP3/BP4 disagree - check REVEL values
+pp3_disagree <- code_compare %>%
+  filter(code == "PP3", vcep != mine) %>%
+  left_join(acmg_base %>% select(chrom, pos, ref, alt, revel, acmg_class), by = var_key) %>%
+  left_join(vcep_matched %>% select(chrom, pos, ref, alt, vcep_class, met_codes), by = var_key)
+
+if (nrow(pp3_disagree) > 0) {
+  cat("\nPP3 disagreements with REVEL values:\n")
+  print(pp3_disagree %>% select(chrom, pos, ref, alt, vcep_class, met_codes, revel, acmg_class))
+}
+```
+
+# 6. Summary of discrepancy types
+
+```{r summary}
+cat("=== DISCREPANCY SUMMARY ===\n\n")
+
+cat("1. CODES I CANNOT APPLY (VCEP-only, require patient data):\n")
+vcep_only_summary %>%
+  filter(!code %in% c("PS1","PS2","PM1","PM2","PP2","PP3","BA1","BS1","BP4")) %>%
+  print()
+
+cat("\n2. PM2 WEIGHT: I apply at Moderate (4.33x); VCEP applies at Supporting (2.08x)\n")
+pm2_vcep %>% print()
+
+cat("\n3. PS2 STRENGTH: I apply at Moderate; VCEP uses:\n")
+vcep_long %>% filter(code == "PS2") %>% count(strength, sort=TRUE) %>% print()
+
+cat("\n4. PP2 RESTRICTION: I restrict to BRAF/MAP2K1/PTPN11 —\n")
+cat("   VCEP genes where PP2 is applied:\n")
+vcep_long %>%
+  filter(code == "PP2") %>%
+  left_join(vcep_matched %>% select(chrom, pos, ref, alt, gene = GeneSymbol), by = var_key) %>%
+  count(gene) %>% print()
+
+cat("\n5. CODES I FIRE THAT VCEP DOESN'T:\n")
+mine_only_variants %>% count(code, sort=TRUE) %>% print()
+```
