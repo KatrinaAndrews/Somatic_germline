@@ -460,27 +460,165 @@ if (nrow(pp3_disagree) > 0) {
 
 # 6. Summary of discrepancy types
 
-```{r summary}
-cat("=== DISCREPANCY SUMMARY ===\n\n")
+## Code glossary
 
-cat("1. CODES I CANNOT APPLY (VCEP-only, require patient data):\n")
-vcep_only_summary %>%
-  filter(!code %in% c("PS1","PS2","PM1","PM2","PP2","PP3","BA1","BS1","BP4")) %>%
+Each ACMG/AMP evidence code and its meaning in the RASopathy VCEP context:
+
+| Code | Direction | Definition |
+|------|-----------|------------|
+| **PVS1** | Pathogenic Very Strong | Null variant (nonsense, frameshift, splice ±1/2, start-loss) in a gene where loss of function is the disease mechanism |
+| **PS1** | Pathogenic Strong | Same amino acid change as a previously established pathogenic variant |
+| **PS2** | Pathogenic Strong* | Confirmed *de novo* (paternity and maternity verified) in a patient with the disease and no family history. *Applied at Moderate or Very Strong by RASopathy VCEP depending on number of de novos* |
+| **PS3** | Pathogenic Strong* | Well-established functional studies show a damaging effect (e.g., RAS activation assay, phosphatase assay). *Strength varied by VCEP* |
+| **PS4** | Pathogenic Strong* | Variant prevalence significantly higher in affected individuals than in controls. *Strength varied by VCEP* |
+| **PM1** | Pathogenic Moderate | Located in a mutational hotspot or well-established functional domain with no or few benign variants |
+| **PM2** | Pathogenic Supporting* | Absent or at extremely low frequency in population databases (gnomAD). *RASopathy VCEP applies at Supporting strength, not default Moderate* |
+| **PM5** | Pathogenic Moderate | Novel missense at a codon where a different pathogenic missense change has been established |
+| **PM6** | Pathogenic Moderate* | Assumed *de novo* (maternity/paternity not confirmed). *Strength varied by VCEP; used in place of PS2 when de novo not formally confirmed* |
+| **PP1** | Pathogenic Supporting | Cosegregation with disease in multiple affected family members |
+| **PP2** | Pathogenic Supporting | Missense variant in a gene with a low rate of benign missense variation (gnomAD missense z score > 3.09). *Applicable only in BRAF, MAP2K1, PTPN11 per VCEP spec* |
+| **PP3** | Pathogenic Supporting | Computational evidence supports pathogenic effect: REVEL score ≥ 0.70 |
+| **BA1** | Benign Standalone | Allele frequency > 5% in gnomAD (variant too common to be a dominant disease-causing variant) |
+| **BS1** | Benign Strong | Allele frequency greater than expected given disease prevalence (> 0.025% in gnomAD for RASopathies per VCEP) |
+| **BS2** | Benign Strong | Variant observed in a healthy adult with a condition of full penetrance |
+| **BS3** | Benign Strong | Functional studies show no damaging effect |
+| **BS4** | Benign Strong | Lack of segregation in affected family members |
+| **BP2** | Benign Supporting | Observed in trans with a pathogenic variant for a dominant disorder |
+| **BP4** | Benign Supporting | Computational evidence supports benign effect: REVEL score ≤ 0.30 |
+| **BP5** | Benign Supporting | Variant found in a case with an alternative molecular explanation for the phenotype |
+| **BP7** | Benign Supporting | Synonymous variant with no predicted effect on splicing |
+
+\* Strength modified from ACMG default by RASopathy VCEP.
+
+---
+
+## Discrepancy table
+
+```{r summary-table}
+# Annotate each code with its definition and discrepancy category
+code_definitions <- tribble(
+  ~code,  ~direction,  ~definition,
+  "PVS1", "P Very Strong",    "Null variant (nonsense/frameshift/splice) in LOF gene",
+  "PS1",  "P Strong",         "Same amino acid change as established pathogenic variant",
+  "PS2",  "P Strong*",        "Confirmed de novo (paternity/maternity verified)",
+  "PS3",  "P Strong*",        "Functional studies show damaging effect",
+  "PS4",  "P Strong*",        "Prevalence significantly higher in affected vs controls",
+  "PM1",  "P Moderate",       "Located in mutational hotspot or critical functional domain",
+  "PM2",  "P Supporting*",    "Absent/very rare in gnomAD population databases",
+  "PM5",  "P Moderate",       "Novel missense at codon with different known pathogenic missense",
+  "PM6",  "P Moderate*",      "Assumed de novo (paternity/maternity not confirmed)",
+  "PP1",  "P Supporting",     "Cosegregation with disease in affected family members",
+  "PP2",  "P Supporting",     "Missense in gene with low benign missense rate (z > 3.09)",
+  "PP3",  "P Supporting",     "Computational support for pathogenicity (REVEL >= 0.70)",
+  "BA1",  "B Standalone",     "Allele frequency > 5% in gnomAD",
+  "BS1",  "B Strong",         "Allele frequency > expected for disease (> 0.025% gnomAD)",
+  "BS2",  "B Strong",         "Observed in healthy adult with full-penetrance condition",
+  "BS3",  "B Strong",         "Functional studies show no damaging effect",
+  "BS4",  "B Strong",         "Lack of segregation in affected family members",
+  "BP2",  "B Supporting",     "Observed in trans with pathogenic variant (dominant disorder)",
+  "BP4",  "B Supporting",     "Computational support for benign effect (REVEL <= 0.30)",
+  "BP5",  "B Supporting",     "Variant found with alternative molecular explanation",
+  "BP7",  "B Supporting",     "Synonymous variant, no predicted splicing effect"
+)
+
+discrepancy_categories <- tribble(
+  ~code, ~category, ~explanation,
+  "PS1",  "VCEP-only: circularity",
+          "Set to FALSE in this analysis to avoid circularity — the VCEP submission itself is the 3-star ClinVar record",
+  "PS2",  "Partial agreement; strength discrepancy",
+          "I apply PS2 at Moderate (PM) strength using ClinVar Origin='de novo'. VCEP applies at Very Strong for multiple confirmed de novos. 25 VCEP-only: ClinVar Origin field does not flag as de novo even though VCEP treats as such. 26 mine-only: ClinVar says de novo but VCEP uses PM6 instead",
+  "PS3",  "VCEP-only: requires functional data",
+          "Requires access to published functional assay results; cannot be automated",
+  "PS4",  "VCEP-only: requires case count data",
+          "Requires access to patient databases to count affected individuals; cannot be automated",
+  "PM1",  "Partial agreement; hotspot list incomplete",
+          "Both apply; VCEP fires for 24 additional variants not in my hotspot list — hotspot list may need updating",
+  "PM2",  "Strength discrepancy",
+          "Both apply well (107/120 VCEP instances matched). VCEP applies at Supporting strength (LR=2.08); my pipeline applies at Moderate (LR=4.33), over-weighting PM2 by ~2x",
+  "PM5",  "VCEP-only: requires variant database lookup",
+          "Requires checking whether a different pathogenic missense at the same codon exists; cannot be automated without a curated variant database",
+  "PM6",  "VCEP-only: requires clinical de novo assessment",
+          "Used when de novo status is assumed but paternity/maternity not formally confirmed; requires clinical information not in ClinVar",
+  "PP1",  "VCEP-only: requires family data",
+          "Cosegregation data requires access to family history records; cannot be automated",
+  "PP2",  "Partial agreement; gene restriction differs",
+          "I restrict to BRAF/MAP2K1/PTPN11 (gnomAD z > 3.09 per VCEP spec). VCEP also applies PP2 in HRAS, KRAS, MAP2K2, RAF1, SHOC2, SOS1 despite their gene-level VCEP pages stating 'not applicable' — inconsistency in VCEP documentation vs practice",
+  "PP3",  "Good agreement",
+          "102/105 VCEP applications matched. 3 minor discrepancies likely due to borderline REVEL values or missing REVEL data",
+  "BA1",  "Good agreement",
+          "26/29 VCEP applications matched. 8 mine-only: these variants have gnomAD AF > 0.05% in my data but VCEP does not apply BA1, possibly a gnomAD version difference or AF close to threshold",
+  "BS1",  "Partial agreement; gnomAD version likely differs",
+          "5/21 VCEP applications matched. 16 VCEP-only: likely gnomAD version or AF threshold differences. 3 mine-only",
+  "BS2",  "VCEP-only: requires clinical data",
+          "Requires knowledge that the variant has been observed in a healthy adult; cannot be automated",
+  "BS3",  "VCEP-only: requires functional data",
+          "Requires access to published functional assay results",
+  "BS4",  "VCEP-only: requires family data",
+          "Requires family segregation information",
+  "BP4",  "I apply more than VCEP",
+          "I fire BP4 for 33 variants the VCEP doesn't. Of these, 28 have BA1 or BS1 in VCEP codes — VCEP omits BP4 as redundant when a standalone benign code already applies. 5 are VUS: VCEP appears not to apply BP4 despite REVEL clearly <= 0.30 — likely inconsistent VCEP application",
+  "BP5",  "VCEP-only: requires clinical data",
+          "Requires knowledge of an alternative molecular diagnosis in the proband; cannot be automated",
+  "BP7",  "VCEP-only: outside pipeline scope",
+          "Applied to synonymous variants; my pipeline is restricted to missense variants"
+)
+
+summary_table <- code_definitions %>%
+  left_join(code_summary %>% select(code, vcep_total, mine_total, both_apply,
+                                     vcep_only, mine_only),
+            by = "code") %>%
+  left_join(discrepancy_categories, by = "code") %>%
+  mutate(across(c(vcep_total, mine_total, both_apply, vcep_only, mine_only),
+                ~ replace_na(., 0L))) %>%
+  arrange(direction, code)
+
+summary_table %>%
+  select(Code = code, Direction = direction, Definition = definition,
+         `VCEP n` = vcep_total, `Mine n` = mine_total,
+         Both = both_apply, `VCEP only` = vcep_only, `Mine only` = mine_only,
+         `Discrepancy explanation` = explanation) %>%
+  knitr::kable()
+```
+
+## Discrepancy categories at a glance
+
+```{r summary-categories}
+cat("=== GOOD AGREEMENT (both apply, mostly concordant) ===\n")
+summary_table %>%
+  filter(both_apply >= 20, vcep_only <= 5, mine_only <= 5) %>%
+  select(code, definition, vcep_total, mine_total, both_apply) %>%
   print()
 
-cat("\n2. PM2 WEIGHT: I apply at Moderate (4.33x); VCEP applies at Supporting (2.08x)\n")
-pm2_vcep %>% print()
+cat("\n=== STRENGTH DISCREPANCIES (both apply but at different weights) ===\n")
+cat("PM2: VCEP applies at Supporting (LR=2.08); pipeline applies at Moderate (LR=4.33)\n")
+vcep_long %>% filter(code == "PM2") %>%
+  mutate(strength = if_else(is.na(strength), "default (Moderate)", strength)) %>%
+  count(strength, name = "n_vcep") %>% print()
 
-cat("\n3. PS2 STRENGTH: I apply at Moderate; VCEP uses:\n")
-vcep_long %>% filter(code == "PS2") %>% count(strength, sort=TRUE) %>% print()
+cat("\nPS2: VCEP applies at various strengths; pipeline always applies at Moderate\n")
+vcep_long %>% filter(code == "PS2") %>%
+  mutate(strength = if_else(is.na(strength), "default", strength)) %>%
+  count(strength, name = "n_vcep") %>% print()
 
-cat("\n4. PP2 RESTRICTION: I restrict to BRAF/MAP2K1/PTPN11 —\n")
-cat("   VCEP genes where PP2 is applied:\n")
-vcep_long %>%
-  filter(code == "PP2") %>%
-  left_join(vcep_matched %>% select(chrom, pos, ref, alt, gene = GeneSymbol), by = var_key) %>%
-  count(gene) %>% print()
+cat("\n=== I APPLY BUT VCEP DOESN'T ===\n")
+cat("(n = number of variants where I fire the code and VCEP does not)\n")
+summary_table %>%
+  filter(mine_only > 0) %>%
+  select(code, definition, mine_only, explanation) %>%
+  arrange(desc(mine_only)) %>%
+  print(n = 20)
 
-cat("\n5. CODES I FIRE THAT VCEP DOESN'T:\n")
-mine_only_variants %>% count(code, sort=TRUE) %>% print()
+cat("\n=== VCEP APPLIES BUT I CAN'T (requires patient/family/functional data) ===\n")
+summary_table %>%
+  filter(vcep_only > 5, both_apply == 0) %>%
+  select(code, definition, vcep_only, explanation) %>%
+  arrange(desc(vcep_only)) %>%
+  print(n = 20)
+
+cat("\n=== PARTIAL AGREEMENT (both apply but with notable gaps) ===\n")
+summary_table %>%
+  filter(both_apply > 0, (vcep_only > 5 | mine_only > 5)) %>%
+  select(code, definition, vcep_total, mine_total, both_apply, vcep_only, mine_only, explanation) %>%
+  arrange(desc(vcep_total)) %>%
+  print(n = 20)
 ```
