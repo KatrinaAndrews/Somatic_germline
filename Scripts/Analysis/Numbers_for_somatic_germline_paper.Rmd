@@ -104,6 +104,31 @@ path_acmg        <- read_tsv("../../Data/auto_ACMG_output/Clinvar_path_ACMG_2404
 path_acmg_somatic <- read_tsv("../../Data/auto_ACMG_output/Clinvar_path_ACMG_somatic_240426.tsv")
 benign_acmg      <- read_tsv("../../Data/auto_ACMG_output/Clinvar_benign_ACMG_240426.tsv")
 benign_acmg_somatic <- read_tsv("../../Data/auto_ACMG_output/Clinvar_benign_ACMG_somatic_240426.tsv")
+
+# ClinVar group labels (VUS vs Conflicting) for joining to auto-ACMG output
+clinvar_vus_meta <- read_tsv(
+  "../../Data/Clinvar_060225/Clinvar_build_38_DDG2P_germline_VUS_conflicting_missense.tsv.gz",
+  show_col_types = FALSE
+) %>%
+  mutate(var_ID = paste0("chr", Chromosome, "_", PositionVCF, "_",
+                         ReferenceAlleleVCF, "_", AlternateAlleleVCF)) %>%
+  select(var_ID, ClinicalSignificance)
+
+add_clinvar_group <- function(df) {
+  df %>%
+    mutate(var_ID = paste(chrom, pos, ref, alt, sep = "_")) %>%
+    left_join(clinvar_vus_meta, by = "var_ID") %>%
+    mutate(clinvar_group = case_when(
+      ClinicalSignificance == "Uncertain significance"                       ~ "VUS",
+      ClinicalSignificance == "Conflicting classifications of pathogenicity" ~ "Conflicting",
+      TRUE ~ NA_character_
+    )) %>%
+    filter(!is.na(clinvar_group)) %>%
+    select(-var_ID, -ClinicalSignificance)
+}
+
+vus_before_grp <- add_clinvar_group(VUS_acmg)
+vus_after_grp  <- add_clinvar_group(VUS_acmg_somatic)
 ```
 
 ```{r}
@@ -440,62 +465,75 @@ cat(
 # 6. ACMG reclassification
 
 ```{r}
-# VUS class distribution without and with somatic criteria
-vus_classes_before <- VUS_acmg %>%
-  count(acmg_class, name = "n_before") %>%
-  mutate(pct_before = round(100 * n_before / sum(n_before), 1))
+# Unresolved = auto-ACMG class still "VUS", broken down by ClinVar group
+unresolved_before <- vus_before_grp %>% filter(acmg_class == "VUS") %>% count(clinvar_group)
+unresolved_after  <- vus_after_grp  %>% filter(acmg_class == "VUS") %>% count(clinvar_group)
 
-vus_classes_after <- VUS_acmg_somatic %>%
-  count(acmg_class, name = "n_after") %>%
-  mutate(pct_after = round(100 * n_after / sum(n_after), 1))
+n_vus_before  <- unresolved_before %>% filter(clinvar_group == "VUS")         %>% pull(n)
+n_conf_before <- unresolved_before %>% filter(clinvar_group == "Conflicting") %>% pull(n)
+n_vus_after   <- unresolved_after  %>% filter(clinvar_group == "VUS")         %>% pull(n)
+n_conf_after  <- unresolved_after  %>% filter(clinvar_group == "Conflicting") %>% pull(n)
 
-vus_comparison <- full_join(vus_classes_before, vus_classes_after, by = "acmg_class") %>%
-  arrange(acmg_class)
-
-cat("VUS classification before and after adding somatic criteria:\n")
-print(vus_comparison)
+cat(sprintf("ClinVar VUS unresolved:        before = %d, after = %d, reduction = %.1f%%\n",
+            n_vus_before, n_vus_after,
+            100 * (n_vus_before - n_vus_after) / n_vus_before))
+cat(sprintf("ClinVar Conflicting unresolved: before = %d, after = %d, reduction = %.1f%%\n",
+            n_conf_before, n_conf_after,
+            100 * (n_conf_before - n_conf_after) / n_conf_before))
 ```
 
 ```{r}
-# Summary: how many VUS reclassified upward (to LP or P)?
-n_vus_reclassified_up_before <- VUS_acmg %>%
-  filter(acmg_class %in% c("Likely pathogenic", "Pathogenic")) %>%
-  nrow()
+# Direction of reclassification among variants that were auto-ACMG VUS before somatic weighting
+reclass_direction <- vus_before_grp %>%
+  filter(acmg_class == "VUS") %>%
+  select(chrom, pos, ref, alt, clinvar_group) %>%
+  left_join(
+    vus_after_grp %>% select(chrom, pos, ref, alt, acmg_after = acmg_class),
+    by = c("chrom", "pos", "ref", "alt")
+  ) %>%
+  mutate(direction = case_when(
+    acmg_after %in% c("Benign", "Likely benign")         ~ "Down to (likely) benign",
+    acmg_after %in% c("Likely pathogenic", "Pathogenic") ~ "Up to (likely) pathogenic",
+    TRUE                                                  ~ "Still VUS"
+  ))
 
-n_vus_reclassified_up_after <- VUS_acmg_somatic %>%
-  filter(acmg_class %in% c("Likely pathogenic", "Pathogenic")) %>%
-  nrow()
+cat("Direction of reclassification — all unresolved variants:\n")
+print(reclass_direction %>% count(direction) %>% mutate(pct = round(100 * n / sum(n), 1)))
 
-cat(
-  "VUS reclassified to LP/P (without somatic):", n_vus_reclassified_up_before, "\n",
-  "VUS reclassified to LP/P (with somatic):", n_vus_reclassified_up_after, "\n",
-  "Additional reclassifications with somatic criteria:",
-    n_vus_reclassified_up_after - n_vus_reclassified_up_before, "\n"
-)
+cat("\nBy ClinVar group:\n")
+print(reclass_direction %>% count(clinvar_group, direction) %>%
+        group_by(clinvar_group) %>% mutate(pct = round(100 * n / sum(n), 1)))
+
+# Fraction of reclassifications that were downward
+n_reclass <- reclass_direction %>% filter(direction != "Still VUS") %>% nrow()
+n_down    <- reclass_direction %>% filter(direction == "Down to (likely) benign") %>% nrow()
+cat(sprintf("\nOf %d reclassifications: %d (%.1f%%) downward to (likely) benign\n",
+            n_reclass, n_down, 100 * n_down / n_reclass))
 ```
 
 ```{r}
-# Pathogenic variants: how many downgraded by somatic criteria (benign somatic code applied)?
-n_path_downgraded <- path_acmg_somatic %>%
-  filter(acmg_class %in% c("VUS", "Likely benign", "Benign")) %>%
-  nrow()
+# Correct classification rate for (likely) pathogenic and (likely) benign groups
+cat("Pathogenic group — auto-ACMG correct (LP or P):\n")
+cat(sprintf("  Before somatic weighting: %.1f%%\n",
+            100 * mean(path_acmg$acmg_class %in% c("Likely pathogenic", "Pathogenic"))))
+cat(sprintf("  After somatic weighting:  %.1f%%\n",
+            100 * mean(path_acmg_somatic$acmg_class %in% c("Likely pathogenic", "Pathogenic"))))
 
-cat("Pathogenic variants reclassified to VUS/LB/B with somatic criteria:", n_path_downgraded, "\n")
+cat("Benign group — auto-ACMG correct (LB or B):\n")
+cat(sprintf("  Before somatic weighting: %.1f%%\n",
+            100 * mean(benign_acmg$acmg_class %in% c("Likely benign", "Benign"))))
+cat(sprintf("  After somatic weighting:  %.1f%%\n",
+            100 * mean(benign_acmg_somatic$acmg_class %in% c("Likely benign", "Benign"))))
 ```
 
 ```{r}
-# Somatic criteria applied: how many VUS received a somatic pathogenic code?
+# Somatic criteria applied: how many VUS received a somatic code?
 if ("SOM_PS" %in% names(VUS_acmg_somatic)) {
-  n_som_ps <- sum(VUS_acmg_somatic$SOM_PS, na.rm = TRUE)
-  n_som_pm <- sum(VUS_acmg_somatic$SOM_PM, na.rm = TRUE)
-  n_som_pp <- sum(VUS_acmg_somatic$SOM_PP, na.rm = TRUE)
-  n_som_bp <- sum(VUS_acmg_somatic$SOM_BP, na.rm = TRUE)
-
   cat(
-    "VUS with SOM_PS (somatic strong pathogenic):", n_som_ps, "\n",
-    "VUS with SOM_PM (somatic moderate pathogenic):", n_som_pm, "\n",
-    "VUS with SOM_PP (somatic supporting pathogenic):", n_som_pp, "\n",
-    "VUS with SOM_BP (somatic supporting benign):", n_som_bp, "\n"
+    "VUS with SOM_PS (somatic strong pathogenic):",  sum(VUS_acmg_somatic$SOM_PS, na.rm = TRUE), "\n",
+    "VUS with SOM_PM (somatic moderate pathogenic):", sum(VUS_acmg_somatic$SOM_PM, na.rm = TRUE), "\n",
+    "VUS with SOM_PP (somatic supporting pathogenic):",sum(VUS_acmg_somatic$SOM_PP, na.rm = TRUE), "\n",
+    "VUS with SOM_BP (somatic supporting benign):",   sum(VUS_acmg_somatic$SOM_BP, na.rm = TRUE), "\n"
   )
 }
 ```
