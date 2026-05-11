@@ -1,7 +1,9 @@
 # ACMG_auto.R — missense-only, dominant gene ACMG classification (no somatic weighting)
 #
 # Applies Bayesian ACMG framework using PS1, PS2, PM1, PM2, PP2, PP3, BA1, BS1, BP4.
-# VCEP rules: RASopathy VCEP allele frequency cutoffs; PP2 applied to all missense.
+# VCEP rules: RASopathy VCEP allele frequency cutoffs; PP2 applied only to BRAF/MAP2K1/PTPN11.
+# PS2 (de novo confirmed): applied at moderate (PM) strength per RASopathy VCEP — one confirmed
+# de novo is PM-level; do not sum multiple de novos to higher strength.
 #
 # Usage:
 #   Rscript ACMG_auto.R <variants.tsv> <hotspots.tsv> <output.tsv>
@@ -19,9 +21,9 @@ variants_path <- args[1]
 hotspots_path <- args[2]
 output        <- args[3]
 
-# RASopathy genes where PP2_supporting is generally applicable (all RASopathy VCEP genes)
-pp2_genes <- c("PTPN11","SOS1","SOS2","RAF1","BRAF","KRAS","HRAS","NRAS",
-               "MAP2K1","MAP2K2","RIT1","SHOC2")
+# RASopathy VCEP genes where PP2 is applicable (missense z score >3.09 in gnomAD)
+# BRAF: GN049, MAP2K1: GN045, PTPN11: GN043 — all others explicitly not applicable
+pp2_genes <- c("BRAF", "MAP2K1", "PTPN11")
 
 # --- Parameters: prior & LRs (Tavtigian odds-path) ---
 prior_p    <- 0.10
@@ -54,7 +56,7 @@ v <- read_tsv(variants_path, show_col_types = FALSE) %>%
   left_join(hotspots, by = c("gene", "codon")) %>%
   mutate(hotspot = coalesce(hotspot, FALSE),
          cov_ok  = is.na(gnomad_min_cov) | gnomad_min_cov >= 10) %>%
-  mutate(PP2_supporting = grepl("missense", consequence))
+  mutate(PP2_supporting = grepl("missense", consequence) & gene %in% pp2_genes)
 
 # --- Evidence flags (dominant, missense) ---
 v2 <- v %>%
@@ -88,7 +90,7 @@ res <- v2 %>%
   mutate(
     log_odds = log(prior_odds) +
       as.numeric(PS1) * log(LR$PS) +
-      as.numeric(PS2) * log(LR$PS) +
+      as.numeric(PS2) * log(LR$PM) +  # moderate strength per VCEP
       as.numeric(PM1) * log(LR$PM) +
       as.numeric(PM2) * log(LR$PM) +
       as.numeric(PP3) * log(LR$PP) +

@@ -23,6 +23,10 @@ variants_path <- args[1]
 hotspots_path <- args[2]
 output        <- args[3]
 
+# RASopathy VCEP genes where PP2 is applicable (missense z score >3.09 in gnomAD)
+# BRAF: GN049, MAP2K1: GN045, PTPN11: GN043 — all others explicitly not applicable
+pp2_genes <- c("BRAF", "MAP2K1", "PTPN11")
+
 # --- Parameters: prior & LRs (Tavtigian odds-path) ---
 prior_p    <- 0.10
 prior_odds <- prior_p / (1 - prior_p)
@@ -54,7 +58,7 @@ v <- read_tsv(variants_path, show_col_types = FALSE) %>%
   left_join(hotspots, by = c("gene", "codon")) %>%
   mutate(hotspot = coalesce(hotspot, FALSE),
          cov_ok  = is.na(gnomad_min_cov) | gnomad_min_cov >= 10) %>%
-  mutate(PP2_supporting = grepl("missense", consequence))
+  mutate(PP2_supporting = grepl("missense", consequence) & gene %in% pp2_genes)
 
 # --- Evidence flags (dominant, missense) ---
 v2 <- v %>%
@@ -94,7 +98,7 @@ res <- v2 %>%
   mutate(
     log_odds = log(prior_odds) +
       as.numeric(PS1)    * log(LR$PS)  +
-      as.numeric(PS2)    * log(LR$PS)  +
+      as.numeric(PS2)    * log(LR$PM)  +  # moderate strength per VCEP
       as.numeric(PM1)    * log(LR$PM)  +
       as.numeric(PM2)    * log(LR$PM)  +
       as.numeric(PP3)    * log(LR$PP)  +
