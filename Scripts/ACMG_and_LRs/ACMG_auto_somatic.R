@@ -100,7 +100,7 @@ res <- v2 %>%
       as.numeric(PS1)    * log(LR$PS)  +
       as.numeric(PS2)    * log(LR$PM)  +  # moderate strength per VCEP
       as.numeric(PM1)    * log(LR$PM)  +
-      as.numeric(PM2)    * log(LR$PM)  +
+      as.numeric(PM2)    * log(LR$PP)  +  # supporting strength per RASopathy VCEP
       as.numeric(PP3)    * log(LR$PP)  +
       as.numeric(PP2)    * log(LR$PP)  +
       as.numeric(BS1)    * log(LR$BS)  +
