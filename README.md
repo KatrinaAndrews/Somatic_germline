@@ -2,9 +2,11 @@
 
 This repository contains all analysis scripts associated with the manuscript:
 
-> **[Paper title]**
-> [Authors]
-> *[Journal]*, [Year]. DOI: [DOI]
+> **[Using somatic data to aid germline clinical variant
+interpretation in developmental disorders]**
+> [Katrina A Andrews, Matthew DC Neville, Iñigo Martincorena, Raheleh Rahbari, Helen
+Firth, Sarah Lindsay, Marc Tischkowitz, and Matthew E Hurles]
+> Unpublished
 
 ---
 
