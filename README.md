@@ -44,7 +44,7 @@ Scripts/
 
 ## Data availability
 
-Input data files are not included in this repository. Publicly available data used in this analysis can be accessed as follows:
+Publicly available data used in this analysis can be accessed as follows:
 
 | Dataset | Source |
 |---|---|
@@ -61,8 +61,6 @@ Input data files are not included in this repository. Publicly available data us
 | PTEN MAVE scores (abundance) | Matreyek et al. 2021, *Genome Medicine* (doi:10.1186/s13073-021-00984-x) |
 | DDX3X MAVE scores | Radford et al. 2023, *Nature Communications* (doi:10.1038/s41467-023-43041-4) |
 | HRAS MAVE scores | Bandaru et al. 2017, *eLife* (doi:10.7554/eLife.27810) |
-
-Pre-processed annotated variant files used as direct inputs to these scripts are available at: [Zenodo/Figshare DOI to be added].
 
 ---
 
@@ -82,7 +80,7 @@ install.packages(c(
 
 ## Execution order
 
-Scripts must be run in the following order. The data processing scripts (step 1) require large annotation inputs available on the cluster and do not need to be re-run if pre-processed data files are available.
+Scripts must be run in the following order.
 
 **1. Data processing** *(cluster; skip if using pre-processed data)*
 - `Scripts/Data_processing_and_annotation/Annotating_with_clean_NumberSubmissions.Rmd`
@@ -117,6 +115,6 @@ Scripts must be run in the following order. The data processing scripts (step 1)
 
 ## Contact
 
-[Author name] — [email]
+[Katrina Andrews] — [ka13@sanger.ac.uk]
 
 Wellcome Sanger Institute
