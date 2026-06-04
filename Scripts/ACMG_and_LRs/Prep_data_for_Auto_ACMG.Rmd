@@ -84,7 +84,7 @@ stars_from_status <- function(status) {
 
 ```{r clinvar-path, message=FALSE}
 clinvar_path <- read_tsv(
-  "../../Data/Variant_lists/Clinvar_DDG2P_missense_path_annot_240426_public.tsv.gz",
+  "../../Data/Variant_lists/Clinvar_DDG2P_missense_path_annot_260526_public.tsv.gz",
   show_col_types = FALSE
 )
 
@@ -114,7 +114,7 @@ write_tsv(clinvar_path_ras,
 
 ```{r clinvar-benign, message=FALSE}
 clinvar_benign <- read_tsv(
-  "../../Data/Variant_lists/Clinvar_DDG2P_missense_benign_annot_240426_public.tsv.gz",
+  "../../Data/Variant_lists/Clinvar_DDG2P_missense_benign_annot_260526_public.tsv.gz",
   show_col_types = FALSE
 )
 
@@ -142,7 +142,7 @@ write_tsv(clinvar_benign_ras,
 
 ```{r clinvar-VUS, message=FALSE}
 clinvar_VUS <- read_tsv(
-  "../../Data/Variant_lists/Clinvar_DDG2P_missense_VUS_annot_240426_public.tsv.gz",
+  "../../Data/Variant_lists/Clinvar_DDG2P_missense_VUS_annot_260526_public.tsv.gz",
   show_col_types = FALSE
 )
 

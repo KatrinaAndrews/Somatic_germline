@@ -30,11 +30,11 @@ read_variants <- function(path) {
     )
 }
 
-clinvar_path   <- read_variants("../../Data/Variant_lists/Clinvar_DDG2P_missense_path_annot_240426_public.tsv.gz")
-clinvar_VUS    <- read_variants("../../Data/Variant_lists/Clinvar_DDG2P_missense_VUS_annot_240426_public.tsv.gz")
-clinvar_benign <- read_variants("../../Data/Variant_lists/Clinvar_DDG2P_missense_benign_annot_240426_public.tsv.gz")
-DNMs_31k       <- read_variants("../../Data/Variant_lists/DNMs_31k_missense_annot_240426_public.tsv.gz")
-biobank_benign <- read_variants("../../Data/Variant_lists/Biobank_missense_variants_annot_240426_public.tsv.gz")
+clinvar_path   <- read_variants("../../Data/Variant_lists/Clinvar_DDG2P_missense_path_annot_260526_public.tsv.gz")
+clinvar_VUS    <- read_variants("../../Data/Variant_lists/Clinvar_DDG2P_missense_VUS_annot_260526_public.tsv.gz")
+clinvar_benign <- read_variants("../../Data/Variant_lists/Clinvar_DDG2P_missense_benign_annot_260526_public.tsv.gz")
+DNMs_31k       <- read_variants("../../Data/Variant_lists/DNMs_31k_missense_annot_260526_public.tsv.gz")
+biobank_benign <- read_variants("../../Data/Variant_lists/Biobank_missense_variants_annot_260526_public.tsv.gz")
 ```
 
 ```{r, message=FALSE}

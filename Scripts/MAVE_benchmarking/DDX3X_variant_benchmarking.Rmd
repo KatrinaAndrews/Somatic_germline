@@ -37,9 +37,9 @@ read_gene <- function(path, gene_name) {
     )
 }
 
-DDX3X_Biobank      <- read_gene("../../Data/Variant_lists/Biobank_missense_variants_annot_240426_public.tsv.gz",  "DDX3X")
-DDX3X_clinvar_path <- read_gene("../../Data/Variant_lists/Clinvar_DDG2P_missense_path_annot_240426_public.tsv.gz","DDX3X")
-DDX3X_DNMs         <- read_gene("../../Data/Variant_lists/DNMs_31k_missense_annot_240426_public.tsv.gz",          "DDX3X")
+DDX3X_Biobank      <- read_gene("../../Data/Variant_lists/Biobank_missense_variants_annot_260526_public.tsv.gz",  "DDX3X")
+DDX3X_clinvar_path <- read_gene("../../Data/Variant_lists/Clinvar_DDG2P_missense_path_annot_260526_public.tsv.gz","DDX3X")
+DDX3X_DNMs         <- read_gene("../../Data/Variant_lists/DNMs_31k_missense_annot_260526_public.tsv.gz",          "DDX3X")
 
 DDX3X_clinvar_phenotype_terms <- read_tsv(
   "../../Data/Clinvar_060225/Clinvar_build_38_DDG2P_germline_path_missense.tsv.gz",

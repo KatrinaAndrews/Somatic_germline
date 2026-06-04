@@ -81,7 +81,7 @@ PTPN11_MAVE_PTP <- read_csv(
   mutate(codon_change = paste0(pos, wt, ">", pos, mut))
 
 DNMs_31k <- read_tsv(
-  "../../Data/Variant_lists/DNMs_31k_missense_annot_240426_public.tsv.gz",
+  "../../Data/Variant_lists/DNMs_31k_missense_annot_260526_public.tsv.gz",
   show_col_types = FALSE
 )
 
@@ -92,10 +92,10 @@ clinvar_raw <- read_tsv(
 ```
 
 ```{r, warning=FALSE, message=FALSE}
-Clinvar_filt_path   <- read_ptpn11("../../Data/Variant_lists/Clinvar_DDG2P_missense_path_annot_240426_public.tsv.gz")
-Clinvar_filt_vus    <- read_ptpn11("../../Data/Variant_lists/Clinvar_DDG2P_missense_VUS_annot_240426_public.tsv.gz")
-Clinvar_filt_benign <- read_ptpn11("../../Data/Variant_lists/Clinvar_DDG2P_missense_benign_annot_240426_public.tsv.gz")
-Biobank_benign      <- read_ptpn11("../../Data/Variant_lists/Biobank_missense_variants_annot_240426_public.tsv.gz")
+Clinvar_filt_path   <- read_ptpn11("../../Data/Variant_lists/Clinvar_DDG2P_missense_path_annot_260526_public.tsv.gz")
+Clinvar_filt_vus    <- read_ptpn11("../../Data/Variant_lists/Clinvar_DDG2P_missense_VUS_annot_260526_public.tsv.gz")
+Clinvar_filt_benign <- read_ptpn11("../../Data/Variant_lists/Clinvar_DDG2P_missense_benign_annot_260526_public.tsv.gz")
+Biobank_benign      <- read_ptpn11("../../Data/Variant_lists/Biobank_missense_variants_annot_260526_public.tsv.gz")
 ```
 
 # Defining NSML (LOF) vs Noonan (GOF) variants

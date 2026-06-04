@@ -15,7 +15,7 @@ Firth, Sarah Lindsay, Marc Tischkowitz, and Matthew E Hurles]
 This project investigates whether somatic mutation data from cancer (COSMIC), sperm Nanoseq, and buccal Nanoseq can be used as evidence to support germline variant classification in dominant developmental disorder (DD) genes. We show that genes driving somatic clonal selection disproportionately accumulate germline gain-of-function variants, and that codon-level somatic counts provide likelihood ratio evidence applicable to ACMG/AMP variant classification.
 
 Key analyses:
-- Benchmarking of somatic features and computational predictors (REVEL, AlphaMissense, ESM1b, CADD, PrimateAI, popEVE) for discriminating pathogenic germline variants from benign population variants, across gene groups (RASopathy genes, altered-function DD genes, loss-of-function DD genes)
+- Benchmarking of somatic features and computational predictors for discriminating pathogenic germline variants from benign population variants, across gene groups (RASopathy genes, altered-function DD genes, loss-of-function DD genes)
 - Logistic regression models combining REVEL with somatic codon-level counts
 - Likelihood ratios for COSMIC missense codon count thresholds, mapped to ACMG/AMP evidence levels
 - Benchmarking against deep mutational scanning (MAVE) data for PTPN11, PTEN, DDX3X, and HRAS
@@ -49,17 +49,18 @@ Input data files are not included in this repository. Publicly available data us
 | Dataset | Source |
 |---|---|
 | ClinVar pathogenic/benign/VUS missense variants | ClinVar (NCBI) |
-| De novo mutations (31k cohort) | [citation] |
+| De novo mutations (31k cohort) | Kaplanis et al. 2020, *Nature* (doi:10.1038/s41586-020-2832-5) |
 | UK Biobank population variants | UK Biobank |
 | COSMIC somatic mutations | COSMIC v98 (cancer.sanger.ac.uk) |
-| TwinsUK sperm Nanoseq | [citation] |
-| Buccal Nanoseq | [citation] |
+| TwinsUK sperm Nanoseq | Neville et al. 2025, *Nature* (doi:10.1038/s41586-025-09448-3) |
+| Buccal Nanoseq | Lawson et al. 2025, *Nature* (doi:10.1038/s41586-025-09584-w) |
 | DDG2P gene list | GENE2PHENOTYPE (ebi.ac.uk/gene2phenotype) |
 | RASopathy VCEP gene list | ClinGen |
-| PTPN11 MAVE scores | Jiang et al. 2025, Nature Communications |
-| PTEN MAVE scores | [citation] |
-| DDX3X MAVE scores | [citation] |
-| HRAS MAVE scores | [citation] |
+| PTPN11 MAVE scores | Jiang et al. 2025, *Nature Communications* (doi:10.1038/s41467-025-60641-3) |
+| PTEN MAVE scores (activity) | Mighell et al. 2018, *Am. J. Hum. Genet.* (doi:10.1016/j.ajhg.2018.03.018) |
+| PTEN MAVE scores (abundance) | Matreyek et al. 2021, *Genome Medicine* (doi:10.1186/s13073-021-00984-x) |
+| DDX3X MAVE scores | Radford et al. 2023, *Nature Communications* (doi:10.1038/s41467-023-43041-4) |
+| HRAS MAVE scores | Bandaru et al. 2017, *eLife* (doi:10.7554/eLife.27810) |
 
 Pre-processed annotated variant files used as direct inputs to these scripts are available at: [Zenodo/Figshare DOI to be added].
 
