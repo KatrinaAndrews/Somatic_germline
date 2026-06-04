@@ -4,6 +4,9 @@
 !/README.md
 !/Scripts/
 
+# Scripts kept locally but not for publication
+/Scripts_not_for_publication/
+
 # Exclude generated HTML outputs (knitted Rmd output)
 Scripts/**/*.html
 

@@ -65,7 +65,7 @@ dir.create("../../Data/Figures",                  recursive = TRUE, showWarnings
 
 Clinvar_vs_Biobank <- read_csv("../../Data/ML_model_input/Gene_group_models/Clinvar_vs_Biobank_unique_set1_240426.csv.gz")
 DNM_vs_Biobank     <- read_csv("../../Data/ML_model_input/Gene_group_models/DNM_vs_Biobank_unique_set1_240426.csv.gz")
-tmp_clinvar        <- read_tsv("../../Data/Variant_lists/Clinvar_DDG2P_missense_path_annot_240426_public.tsv.gz")
+tmp_clinvar        <- read_tsv("../../Data/Variant_lists/Clinvar_DDG2P_missense_path_annot_260526_public.tsv.gz")
 ```
 
 ```{r, warning=FALSE, message=FALSE}
@@ -136,7 +136,7 @@ sperm_vis       <- read_tsv("../../Data/Gene_vis/Sperm_seq_for_gene_vis_TwinsUK_
                             show_col_types = FALSE) %>%
   mutate(codon    = as.integer(stringr::str_extract(amino_acid_change, "^[0-9]+")),
          missense = if_else(Consequence == "missense", "missense", "non_missense"))
-buccal_vis      <- read_tsv("../../Data/Gene_vis/Buccal_data_for_gene_visualisation_240426.tsv.gz")
+buccal_vis      <- read_tsv("../../Data/Gene_vis/Buccal_data_for_gene_visualisation_260526.tsv.gz")
 PTPN11_MAVE_vis <- read_csv("../../Data/MAVE/PTPN11_MAVE_Jiang_2025/PTPN11_MAVE_SHP2_FL_41467_2025_60641_MOESM8_ESM.csv") %>%
   clean_names() %>%
   dplyr::select(wt, pos, mut, enrichment_ave)
@@ -354,9 +354,9 @@ make_gene_panel <- function(genes, dataset_name) {
       uplift_cat = factor(uplift_cat, levels = c("<0","0–0.01","0.01–0.02","0.02–0.03","0.03–0.05",">0.05","missing")),
       p_stars = dplyr::case_when(
         is.na(delong_p_value)      ~ "",
-        delong_p_value < 0.001     ~ "***",
-        delong_p_value < 0.01      ~ "**",
-        delong_p_value < 0.05      ~ "*",
+        (AUC_diff > 0) & (delong_p_value < 0.001)     ~ "***",
+        (AUC_diff > 0) & (delong_p_value < 0.01)      ~ "**",
+        (AUC_diff > 0) & (delong_p_value < 0.05)      ~ "*",
         TRUE                       ~ ""
       ),
       p_stars = ifelse(uplift_cat == "missing", "", p_stars)
@@ -643,8 +643,8 @@ knitr::include_graphics("../../Data/Figures/Final/FigureLabs_graphic_abstract.jp
 ## Figure 1: Mutation frequency and distribution
 
 ```{r, fig.width=16, fig.height=8, warning=FALSE, message=FALSE}
-p1 <- generate_gene_panel_plots("PTPN11", clinvar_vis, COSMIC_vis, DNMs_vis, sperm_vis, buccal_vis, panel_labels = "none")
-p2 <- generate_gene_panel_plots("PIK3CA", clinvar_vis, COSMIC_vis, DNMs_vis, sperm_vis, buccal_vis, panel_labels = "none")
+p1 <- generate_gene_panel_plots("MAP2K1", clinvar_vis, COSMIC_vis, DNMs_vis, sperm_vis, buccal_vis, panel_labels = "none")
+p2 <- generate_gene_panel_plots("KRAS", clinvar_vis, COSMIC_vis, DNMs_vis, sperm_vis, buccal_vis, panel_labels = "none")
 p3 <- generate_gene_panel_plots("RIT1",   clinvar_vis, COSMIC_vis, DNMs_vis, sperm_vis, buccal_vis, panel_labels = "none")
 p4 <- generate_gene_panel_plots("SMAD4",  clinvar_vis, COSMIC_vis, DNMs_vis, sperm_vis, buccal_vis, panel_labels = "none")
 

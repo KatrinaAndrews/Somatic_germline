@@ -67,7 +67,7 @@ add_clean_nsub <- function(df, id_lookup) {
 
 ```{r, message=FALSE, warning=FALSE}
 clinvar_path <- read_tsv(
-  "../../Data/Variant_lists/Clinvar_DDG2P_missense_path_annot_240426_public.tsv.gz"
+  "../../Data/Variant_lists/Clinvar_DDG2P_missense_path_annot_260526_public.tsv.gz"
 )
 
 path_ids <- load_variation_ids(
@@ -81,7 +81,7 @@ clinvar_path_clean <- add_clean_nsub(clinvar_path, path_ids)
 
 ```{r, message=FALSE, warning=FALSE}
 clinvar_benign <- read_tsv(
-  "../../Data/Variant_lists/Clinvar_DDG2P_missense_benign_annot_240426_public.tsv.gz"
+  "../../Data/Variant_lists/Clinvar_DDG2P_missense_benign_annot_260526_public.tsv.gz"
 )
 
 benign_ids <- load_variation_ids(
@@ -95,7 +95,7 @@ clinvar_benign_clean <- add_clean_nsub(clinvar_benign, benign_ids)
 
 ```{r, message=FALSE, warning=FALSE}
 clinvar_VUS <- read_tsv(
-  "../../Data/Variant_lists/Clinvar_DDG2P_missense_VUS_annot_240426_public.tsv.gz"
+  "../../Data/Variant_lists/Clinvar_DDG2P_missense_VUS_annot_260526_public.tsv.gz"
 )
 
 VUS_ids <- load_variation_ids(
@@ -135,7 +135,7 @@ Note: a small number of variants (e.g. BRAF V600E) retain non-zero germline subm
 # Export
 
 ```{r}
-write_tsv(clinvar_path_clean,  "../../Data/Variant_lists/Clinvar_DDG2P_missense_path_annot_240426_public.tsv.gz")
-write_tsv(clinvar_benign_clean, "../../Data/Variant_lists/Clinvar_DDG2P_missense_benign_annot_240426_public.tsv.gz")
-write_tsv(clinvar_VUS_clean,    "../../Data/Variant_lists/Clinvar_DDG2P_missense_VUS_annot_240426_public.tsv.gz")
+write_tsv(clinvar_path_clean,  "../../Data/Variant_lists/Clinvar_DDG2P_missense_path_annot_260526_public.tsv.gz")
+write_tsv(clinvar_benign_clean, "../../Data/Variant_lists/Clinvar_DDG2P_missense_benign_annot_260526_public.tsv.gz")
+write_tsv(clinvar_VUS_clean,    "../../Data/Variant_lists/Clinvar_DDG2P_missense_VUS_annot_260526_public.tsv.gz")
 ```

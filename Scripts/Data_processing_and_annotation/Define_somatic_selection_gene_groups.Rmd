@@ -35,7 +35,7 @@ sperm_selection_genes <- c(
 )
 
 buccal_selection_genes <- c(
-  "NOTCH1", "FAT1", "TP53", "NOTCH2", "ATM", "MGA", "KMT2C", "ASXL1", "CHEKC2",
+  "NOTCH1", "FAT1", "TP53", "NOTCH2", "ATM", "MGA", "KMT2C", "ASXL1", "CHEK2",
   "TET2", "PPM1D", "BCORL1", "ARID1A", "SETD2", "ZFP36L2", "ARID2", "EP300", "NOTCH3",
   "KDM5C", "RAC1", "ARID1B", "RBM10", "KDM6A", "STAG2", "EPHA2", "CIC", "SF3B1",
   "ZFP36L1", "EGFR", "DNMT3A", "PIK3R1", "TP63", "ARID5B", "AJUBA", "FGFR3", "ZNF750",

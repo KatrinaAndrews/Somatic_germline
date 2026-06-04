@@ -15,7 +15,7 @@
 
 
 # Manually load modules before executing script
-# module load HGI/softpack/users/ka13/Katrina_R26/1
+# module load <your_R_module_here>
 
 suppressPackageStartupMessages({
   library(tidyverse)

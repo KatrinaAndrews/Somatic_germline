@@ -30,7 +30,7 @@ recode_data_name <- function(x) {
 ```{r, warning=FALSE, include=FALSE}
 Clinvar_vs_Biobank <- read_csv("../../Data/ML_model_input/Gene_group_models/Clinvar_vs_Biobank_unique_set1_240426.csv.gz")
 DNM_vs_Biobank     <- read_csv("../../Data/ML_model_input/Gene_group_models/DNM_vs_Biobank_unique_set1_240426.csv.gz")
-tmp_clinvar        <- read_tsv("../../Data/Variant_lists/Clinvar_DDG2P_missense_path_annot_240426_public.tsv.gz")
+tmp_clinvar        <- read_tsv("../../Data/Variant_lists/Clinvar_DDG2P_missense_path_annot_260526_public.tsv.gz")
 ```
 
 ```{r, warning=FALSE, message=FALSE}
@@ -211,7 +211,7 @@ cat(
 # RASopathy AUC for key predictors in clinvar_count_weighted
 ras_aucs <- AUCs %>%
   filter(gene_group == "RASopathy", data_name == "clinvar_count_weighted") %>%
-  filter(Predictor %in% c("n_COSMIC_codon_count", "n_sperm_codon_count",
+  filter(Predictor %in% c("n_COSMIC_codon_count", "n_sperm_codon_count", "n_buccal_codon_count",
                           "AlphaMissense", "REVEL",
                           "REVEL_LR_model_test_data")) %>%
   dplyr::select(Predictor, AUC_full, AUC_full_lower, AUC_full_upper) %>%
@@ -245,6 +245,18 @@ ras_uplift <- AUCs_LR_model %>%
 
 cat("RASopathy REVEL+somatic uplift (test):\n")
 print(ras_uplift)
+```
+
+```{r}
+# AUC uplift from adding somatic data to REVEL (test data, AltFunc genes)
+altfunc_uplift <- AUCs_LR_model %>%
+  filter(gene_group == "altfunc", test_or_train == "test",
+         data_name == "clinvar_count_weighted", cep == "REVEL") %>%
+  dplyr::select(AUC_full, AUC_full_lower, AUC_full_upper,
+                AUC_cep_only, AUC_diff, delong_p_value)
+
+cat("AltFunc REVEL+somatic uplift (test):\n")
+print(altfunc_uplift)
 ```
 
 ---
@@ -282,18 +294,58 @@ print(hotcodon_lr)
 
 # 4. Number of genes with somatic predictive power {.tabset}
 
+Although the confidence interval of the AUC captures the uncertainty of an estimate, in the long form data there are a lot of genes where there are only very few UNIQUE pathogenic variants that have a AUC lower CI of >>0.9 and I don't think this is meaningful. I have therefore subset to only genes where >=10 UNIQUE pathogenic and >=10 benign variants available. 
+
 ## AUC lower CI > 0.6
 
 ```{r}
-n_genes_06 <- sum(genes_clinvar_long_auc$auc_lower_06)
-n_genes_total_analyzed <- nrow(genes_clinvar_long_auc)
+genes_with_10 <- n_vars_per_gene_clinvar %>% 
+  filter(n_unique_pathogenic >= 10, n_benign >= 10) 
+genes_clinvar_long_auc_filt <- genes_clinvar_long_auc %>% 
+  filter(gene %in% genes_with_10$gene)
+
+n_genes_06 <- sum(genes_clinvar_long_auc_filt$auc_lower_06)
+n_genes_total_analyzed <- nrow(genes_clinvar_long_auc_filt)
 
 cat(
-  "Genes analyzed (clinvar_count_weighted):", n_genes_total_analyzed, "\n",
+  "Genes analyzed (clinvar_count_weighted, >=10 benign and pathogenic observations):", n_genes_total_analyzed, "\n",
   "Genes with AUC lower CI > 0.6:", n_genes_06, "\n",
   "Percentage:", round(100 * n_genes_06 / n_genes_total_analyzed, 1), "%\n"
 )
 ```
+
+n with AUC lower CI > 0.6 driven by cancer, sperm or buccal codon counts: 
+
+```{r}
+n_cancer_06 <- gene_AUCs_individual_features %>%
+  filter(dataset == "clinvar_count_weighted",
+         Predictor == "n_COSMIC_codon_count",
+         gene %in% genes_clinvar_long_auc_filt$gene) %>%
+  filter(AUC_full_lower > 0.6) %>%
+  nrow()
+
+n_sperm_06 <- gene_AUCs_individual_features %>%
+  filter(dataset == "clinvar_count_weighted",
+         Predictor == "n_sperm_codon_count",
+         gene %in% genes_clinvar_long_auc_filt$gene) %>%
+  filter(AUC_full_lower > 0.6) %>%
+  nrow()
+
+n_buccal_06 <- gene_AUCs_individual_features %>%
+  filter(dataset == "clinvar_count_weighted",
+         Predictor == "n_buccal_codon_count",
+         gene %in% genes_clinvar_long_auc_filt$gene) %>%
+  filter(AUC_full_lower > 0.6) %>%
+  nrow()
+
+cat(
+  "Genes with AUC lower CI > 0.6 driven by cancer codon count:", n_cancer_06, "\n",
+  "Genes with AUC lower CI > 0.6 driven by sperm codon count:", n_sperm_06, "\n",
+  "Genes with AUC lower CI > 0.6 driven by buccal codon count:", n_buccal_06, "\n"
+)
+```
+
+
 
 ```{r}
 # By gene group
@@ -419,6 +471,49 @@ cat(
 )
 print(hurt_by_group)
 ```
+
+## BRAF example: low uplift
+
+(two models for BRAF as it belongs to two gene groups)
+
+LR performance: 
+
+```{r}
+braf_lr <- gene_AUCs_LR_model %>%
+  filter(dataset == "clinvar_count_weighted",
+         CEP == "REVEL",
+         test_or_train == "test",
+         gene == "BRAF") %>%
+  select(AUC_full, AUC_cep_only, AUC_diff, delong_p_value)
+
+braf_lr
+```
+
+
+## PIK3CA example: high uplift
+
+```{r}
+pik3ca_lr <- gene_AUCs_LR_model %>%
+  filter(dataset == "clinvar_count_weighted",
+         CEP == "REVEL",
+         test_or_train == "test",
+         gene == "PIK3CA") %>%
+  select(AUC_full, AUC_cep_only, AUC_diff, delong_p_value)
+
+pik3ca_lr
+```
+
+```{r}
+# pik3ca results for single feature auc
+pik3ca_sf <- gene_AUCs_individual_features %>%
+  filter(dataset == "clinvar_count_weighted",
+         gene == "PIK3CA",
+         Predictor %in% c("n_COSMIC_codon_count", "n_sperm_codon_count", "n_buccal_codon_count")) %>%
+  select(Predictor, AUC_full, AUC_full_lower, AUC_full_upper)
+
+pik3ca_sf
+```
+
 
 ---
 

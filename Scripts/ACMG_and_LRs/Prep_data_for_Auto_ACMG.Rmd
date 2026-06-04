@@ -61,8 +61,8 @@ add_somatic_codes <- function(df) {
     mutate(
       pathogenic_somatic_supporting = FALSE,
       benign_somatic_supporting     = n_COSMIC_codon_count == 0,
-      pathogenic_somatic_moderate   = n_COSMIC_codon_count > 2,
-      pathogenic_somatic_strong     = n_COSMIC_codon_count > 10
+      pathogenic_somatic_strong     = n_COSMIC_codon_count > 10,
+      pathogenic_somatic_moderate   = n_COSMIC_codon_count > 2 & n_COSMIC_codon_count <= 10
     )
 }
 

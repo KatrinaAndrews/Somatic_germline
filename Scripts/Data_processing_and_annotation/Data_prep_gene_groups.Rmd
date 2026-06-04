@@ -33,9 +33,9 @@ dir.create("../../Data/ML_model_input/Gene_group_hold_out_models", recursive = T
 # Import variant lists
 
 ```{r}
-Clinvar_path <- read_tsv("../../Data/Variant_lists/Clinvar_DDG2P_missense_path_annot_240426_public.tsv.gz")
-DNMs         <- read_tsv("../../Data/Variant_lists/DNMs_31k_missense_annot_240426_public.tsv.gz")
-Biobank      <- read_tsv("../../Data/Variant_lists/Biobank_missense_variants_annot_240426_public.tsv.gz")
+Clinvar_path <- read_tsv("../../Data/Variant_lists/Clinvar_DDG2P_missense_path_annot_260526_public.tsv.gz")
+DNMs         <- read_tsv("../../Data/Variant_lists/DNMs_31k_missense_annot_260526_public.tsv.gz")
+Biobank      <- read_tsv("../../Data/Variant_lists/Biobank_missense_variants_annot_260526_public.tsv.gz")
 ```
 
 # Remove pathogenic variants from Biobank

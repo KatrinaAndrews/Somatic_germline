@@ -82,8 +82,7 @@ install.packages(c(
 Scripts must be run in the following order. The data processing scripts (step 1) require large annotation inputs available on the cluster and do not need to be re-run if pre-processed data files are available.
 
 **1. Data processing** *(cluster; skip if using pre-processed data)*
-- `Scripts/Data_processing_and_annotation/Annotate_variants_for_somatic_germline.Rmd`
-- `Scripts/Data_processing_and_annotation/Annating_with_clean_NumberSubmissions.Rmd`
+- `Scripts/Data_processing_and_annotation/Annotating_with_clean_NumberSubmissions.Rmd`
 - `Scripts/Data_processing_and_annotation/Define_cancer_DD_gene_mechanism_sets.Rmd`
 - `Scripts/Data_processing_and_annotation/Define_somatic_selection_gene_groups.Rmd`
 - `Scripts/Data_processing_and_annotation/Data_prep_gene_groups.Rmd`
@@ -102,13 +101,11 @@ Scripts must be run in the following order. The data processing scripts (step 1)
 
 **4. Likelihood ratios and ACMG classification**
 - `Scripts/ACMG_and_LRs/Likelihood_ratio_threshold_calcs.Rmd`
+- `Scripts/ACMG_and_LRs/Likelihood_ratio_threshold_plots.Rmd`
 - `Scripts/ACMG_and_LRs/Prep_data_for_Auto_ACMG.Rmd`
 - `Scripts/ACMG_and_LRs/Auto_ACMG_RASopathy_results_analysis.Rmd`
 
-**5. Upstream figure data exports** *(must run before step 6)*
-- `Scripts/Analysis/Other_visualisations/Gene_upset_plot_DD_cancer_somatic_selection.Rmd`
-
-**6. Manuscript outputs**
+**5. Manuscript outputs**
 - `Scripts/Analysis/Figures_for_somatic_germline_paper.Rmd` — all figures
 - `Scripts/Analysis/Tables_for_somatic_germline_paper.Rmd` — all supplementary tables
 - `Scripts/Analysis/Numbers_for_somatic_germline_paper.Rmd` — all inline numbers
