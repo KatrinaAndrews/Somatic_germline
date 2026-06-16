@@ -30,7 +30,6 @@ recode_data_name <- function(x) {
 ```{r, warning=FALSE, include=FALSE}
 Clinvar_vs_Biobank <- read_csv("../../Data/ML_model_input/Gene_group_models/Clinvar_vs_Biobank_unique_set1_240426.csv.gz")
 DNM_vs_Biobank     <- read_csv("../../Data/ML_model_input/Gene_group_models/DNM_vs_Biobank_unique_set1_240426.csv.gz")
-tmp_clinvar        <- read_tsv("../../Data/Variant_lists/Clinvar_DDG2P_missense_path_annot_260526_public.tsv.gz")
 ```
 
 ```{r, warning=FALSE, message=FALSE}
@@ -265,10 +264,11 @@ print(altfunc_uplift)
 
 ```{r}
 # COSMIC codon count LRs at ACMG-relevant thresholds (RASopathy genes)
+# Count-weighted ClinVar data, matching the LR values quoted in the manuscript text.
 cosmic_lr_ras <- LR %>%
   filter(feature == "n_COSMIC_codon_count",
          gene_group == "RASopathies",
-         data_set == "clinvar_unique_public") %>%
+         data_set == "clinvar_long_public") %>%
   dplyr::select(rule, threshold, sensitivity, specificity,
                 LR_pos, LR_pos_low95, LR_pos_high95) %>%
   arrange(as.numeric(gsub("[^0-9.]", "", threshold)))
@@ -279,10 +279,11 @@ print(cosmic_lr_ras)
 
 ```{r}
 # Hotcodon LRs (COSMIC hotspot)
+# Count-weighted ClinVar data, matching the LR values quoted in the manuscript text.
 hotcodon_lr <- LR %>%
   filter(feature %in% c("hotcodon_cancer", "n_COSMIC"),
          gene_group %in% c("RASopathies", "AllGenes"),
-         data_set == "clinvar_unique_public") %>%
+         data_set == "clinvar_long_public") %>%
   dplyr::select(gene_group, feature, rule, threshold, sensitivity, specificity,
                 LR_pos, LR_pos_low95, LR_pos_high95)
 

@@ -47,7 +47,7 @@ aa3to1 <- c(
 )
 
 vcep <- read_csv(
-  "../../Data/RASopathy_VCEP/RASopathy_expert_var_curation.csv",
+  "../../Data/RASopathy_VCEP/RASopathy_VCEP_classified_variants_110526.csv",
   show_col_types = FALSE
 ) %>%
   mutate(
@@ -60,7 +60,7 @@ vcep <- read_csv(
       str_replace_all(aa3to1)
   )
 
-vcep_path   <- vcep %>% filter(Classification %in% c("Pathogenic", "Likely pathogenic"))
+vcep_path   <- vcep %>% filter(Classification %in% c("Pathogenic", "Likely Pathogenic"))
 vcep_benign <- vcep %>% filter(Classification %in% c("Benign", "Likely Benign"))
 vcep_vus    <- vcep %>% filter(Classification == "Uncertain Significance")
 

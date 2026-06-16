@@ -65,11 +65,16 @@ v2 <- v %>%
     PS2 = coalesce(de_novo_confirmed, FALSE),
     PM1 = hotspot,
     PP2 = coalesce(PP2_supporting, FALSE),
-    PM2 = (is.na(gnomad_popmax_af) | gnomad_popmax_af == 0),
-    PP3 = revel >= thr$pp3_revel,
-    BA1 = cov_ok & (gnomad_popmax_af > thr$ba1),
-    BS1 = cov_ok & (gnomad_popmax_af >= thr$bs1_lo & gnomad_popmax_af < thr$bs1_hi),
-    BP4 = revel <= thr$bp4_revel
+    # PM2/PP3/BA1/BS1/BP4 are coalesced to FALSE: if the required gnomAD AF or
+    # REVEL value is missing, the evidence code is simply not applied (the
+    # posterior is left unchanged) rather than producing NA and forcing a VUS.
+    # PM2 ("absent from gnomAD") requires a queried AF of 0; a missing AF does
+    # not count as absent.
+    PM2 = coalesce(gnomad_popmax_af == 0, FALSE),
+    PP3 = coalesce(revel >= thr$pp3_revel, FALSE),
+    BA1 = coalesce(cov_ok & (gnomad_popmax_af > thr$ba1), FALSE),
+    BS1 = coalesce(cov_ok & (gnomad_popmax_af >= thr$bs1_lo & gnomad_popmax_af < thr$bs1_hi), FALSE),
+    BP4 = coalesce(revel <= thr$bp4_revel, FALSE)
   )
 
 # --- Bayesian combine ---

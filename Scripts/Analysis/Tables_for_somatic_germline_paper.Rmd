@@ -37,7 +37,6 @@ recode_data_name <- function(x) {
 ```{r, warning=FALSE, include=FALSE}
 Clinvar_vs_Biobank <- read_csv("../../Data/ML_model_input/Gene_group_models/Clinvar_vs_Biobank_unique_set1_240426.csv.gz")
 DNM_vs_Biobank     <- read_csv("../../Data/ML_model_input/Gene_group_models/DNM_vs_Biobank_unique_set1_240426.csv.gz")
-tmp_clinvar        <- read_tsv("../../Data/Variant_lists/Clinvar_DDG2P_missense_path_annot_260526_public.tsv.gz")
 ```
 
 ```{r, warning=FALSE, message=FALSE}
@@ -210,10 +209,13 @@ DT::datatable(supp_table5,
 
 # Supplementary Table 6: Likelihood ratios for somatic feature cutoffs
 
-Positive and negative likelihood ratios for COSMIC and Nanoseq feature thresholds against ClinVar unique pathogenic variants.
+Positive and negative likelihood ratios for COSMIC and Nanoseq feature thresholds across all four pathogenic variant dataset forms (ClinVar count-weighted and unique, and de novo mutation count-weighted and unique).
 
 ```{r}
-supp_table6 <- LR %>% filter(data_set == "clinvar_unique_public")
+supp_table6 <- LR %>%
+  filter(data_set %in% c("clinvar_long_public", "clinvar_unique_public",
+                         "DNMs_31k_long_public", "DNMs_31k_unique_public")) %>%
+  arrange(data_set, gene_group, feature)
 
 write_csv(supp_table6, "../../Data/Tables/Supplementary_Table6.csv")
 

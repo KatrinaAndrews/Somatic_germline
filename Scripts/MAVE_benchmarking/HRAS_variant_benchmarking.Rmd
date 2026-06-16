@@ -86,27 +86,48 @@ clinvar_long_biobank_df <- bind_rows(
 ```
 
 ```{r, message=FALSE, warning=FALSE}
-raw <- read_csv(
-  "../../Data/MAVE/HRAS_MAVE_Bandaru_2017/elife-27810-supp1_Regulated_RAS.csv",
-  col_names = FALSE, show_col_types = FALSE
-)
+# HRAS MAVE: Hidalgo et al. 2022 (eLife, doi:10.7554/eLife.76595; Zenodo 6131510).
+# We use the Ba/F3 IL-3 withdrawal selection, a mammalian assay that directly
+# selects for activating Ras variants (preferred over the bacterial assay).
+# The two downloaded files HRas188_BaF3_r{0,1}.csv are replicate scaled-enrichment
+# matrices with NO row/column labels:
+#   - 21 rows  = mutant amino acids, in order A C D E F G H I K L M N P Q R S T V W Y *
+#   - 159 cols = HRAS residue positions 2..160 (catalytic domain)
+# Higher enrichment = more activating (gain of function). Labeling validated:
+# the highest-enrichment positions recover the canonical activating hotspots
+# (Q61, G12, G13). MAVE_score = mean of the two replicates.
+mave_mut_aa <- c("A","C","D","E","F","G","H","I","K","L","M",
+                 "N","P","Q","R","S","T","V","W","Y","*")
+mave_positions <- 2:160
+# HRAS WT amino acids for positions 2..160 (MANE/UniProt P01112), used to build
+# codon_change strings that match the variant lists.
+hras_wt_2_160 <- strsplit(
+  "TEYKLVVVGAGGVGKSALTIQLIQNHFVDEYDPTIEDSYRKQVVIDGETCLLDILDTAGQEEYSAMRDQYMRTGEGFLCVFAINNTKSFEDIHQYREQIKRVKDSDDVPMVLVGNKCDLAARTVESRQAQDLARSYGIPYIETSAKTRQGVEDAFYTLV",
+  "")[[1]]
 
-codon_numbers <- as.character(unlist(raw[1, ], use.names = FALSE))
-wt_by_column  <- as.character(unlist(raw[2, ], use.names = FALSE))
+read_baf3 <- function(path) {
+  as.matrix(read_csv(path, col_names = FALSE, show_col_types = FALSE))
+}
+baf3_r0 <- read_baf3("../../Data/MAVE/HRAS_MAVE_Hidalgo_2022/HRas188_BaF3_r0.csv")
+baf3_r1 <- read_baf3("../../Data/MAVE/HRAS_MAVE_Hidalgo_2022/HRas188_BaF3_r1.csv")
 
-MAVE_data <- raw[-c(1, 2), ] %>%
-  dplyr::rename(mut_aa = X1) %>%
-  pivot_longer(cols = -mut_aa, names_to = "col_id", values_to = "score") %>%
+stopifnot(dim(baf3_r0) == c(length(mave_mut_aa), length(mave_positions)),
+          dim(baf3_r1) == c(length(mave_mut_aa), length(mave_positions)),
+          length(hras_wt_2_160) == length(mave_positions))
+
+baf3_mean <- (baf3_r0 + baf3_r1) / 2
+
+MAVE_data <- expand_grid(ri = seq_along(mave_mut_aa),
+                         cj = seq_along(mave_positions)) %>%
   mutate(
-    col_index = as.integer(str_remove(col_id, "X")),
-    codon     = codon_numbers[col_index],
-    wt_aa     = wt_by_column[col_index],
-    change    = paste0(codon, wt_aa, ">", codon, mut_aa)
+    mut_aa     = mave_mut_aa[ri],
+    position   = mave_positions[cj],
+    wt_aa      = hras_wt_2_160[cj],
+    MAVE_score = baf3_mean[cbind(ri, cj)],
+    codon_change = paste0(position, wt_aa, ">", position, mut_aa)
   ) %>%
-  filter(!is.na(score), !is.na(mut_aa), !is.na(codon), !is.na(wt_aa)) %>%
-  dplyr::select(change, score) %>%
-  dplyr::rename(MAVE_score = score, codon_change = change) %>%
-  mutate(MAVE_score = as.numeric(MAVE_score))
+  filter(!is.na(MAVE_score), mut_aa != "*", mut_aa != wt_aa) %>%   # missense only
+  dplyr::select(codon_change, MAVE_score)
 ```
 
 # Number of HRAS variants

@@ -65,7 +65,7 @@ twoClassSummary_pathogenic <- function(data, lev = NULL, model = NULL) {
                        levels    = c("Benign", "Pathogenic"), quiet = TRUE)
   c(ROC  = as.numeric(pROC::auc(roc_obj)),
     Sens = caret::sensitivity(data$pred, data$obs, positive = "Pathogenic"),
-    Spec = caret::specificity(data$pred, data$obs, negative = "Pathogenic"))
+    Spec = caret::specificity(data$pred, data$obs, negative = "Benign"))
 }
 
 # allowParallel = FALSE: we parallelise at the outer loop, not inside caret

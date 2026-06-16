@@ -1,5 +1,13 @@
 #!/usr/bin/env Rscript
-# Gene-group hold-out LR models (parallelised)
+# Gene-group hold-out LR models (parallelised) — HPC (LSF) deployment variant.
+#
+# This is a cluster-deployment copy of the canonical script one directory up
+# (../Gene_group_hold_out_LR_models_parallel.R). The statistical/model logic is
+# IDENTICAL; this version differs only in (i) core detection via the LSB_DJOB_NUMPROC
+# environment variable instead of detectCores(), and (ii) local in-job-directory I/O
+# paths (reads/writes ./Data/) instead of the repo-relative paths. See the companion
+# job_command_log.txt for the exact bsub submission command. Edit the canonical
+# script first and mirror any logic changes here.
 #
 # Single-feature AUC/AUPRC/F1/MCC is computed separately in:
 #   Gene_group_hold_out_single_feature_AUC_AUPRC_F1_MCC.Rmd
@@ -74,7 +82,7 @@ twoClassSummary_pathogenic <- function(data, lev = NULL, model = NULL) {
                        levels    = c("Benign", "Pathogenic"), quiet = TRUE)
   c(ROC  = as.numeric(pROC::auc(roc_obj)),
     Sens = caret::sensitivity(data$pred, data$obs, positive = "Pathogenic"),
-    Spec = caret::specificity(data$pred, data$obs, negative = "Pathogenic"))
+    Spec = caret::specificity(data$pred, data$obs, negative = "Benign"))
 }
 
 # allowParallel = FALSE: we parallelise at the outer loop, not inside caret

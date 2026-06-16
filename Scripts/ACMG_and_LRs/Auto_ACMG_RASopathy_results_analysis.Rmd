@@ -258,6 +258,12 @@ reclass_table <- vus %>%
   left_join(vus_somatic %>% dplyr::select(chrom, pos, ref, alt, acmg_class),
             by = c("chrom", "pos", "ref", "alt"))
 
+# The somatic and non-somatic ACMG runs take the same input variant file, so
+# every variant must appear in both outputs. Fail loudly if any after-class is
+# missing (an unmatched join would otherwise silently bias pct_resolved down,
+# since NA != "VUS" drops those rows from the numerator but not the denominator).
+stopifnot(sum(is.na(reclass_table$acmg_class)) == 0)
+
 denominator <- reclass_table %>% filter(acmg_class_before == "VUS") %>% nrow()
 
 reclass_tab <- reclass_table %>%

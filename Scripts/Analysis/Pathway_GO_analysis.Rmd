@@ -25,7 +25,7 @@ dir.create("../../Data/Figures", recursive = TRUE, showWarnings = FALSE)
 recode_data_name <- function(x) {
   dplyr::case_match(x,
     c("clinvar_long", "clinvar_long_uncontaminated") ~ "clinvar_count_weighted",
-    "DNM_long"                                       ~ "DNM_count_weighted",
+    c("DNM_long", "DNM_long_uncontaminated")         ~ "DNM_count_weighted",
     .default = x
   )
 }

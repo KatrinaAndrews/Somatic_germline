@@ -58,9 +58,9 @@ Publicly available data used in this analysis can be accessed as follows:
 | RASopathy VCEP gene list | ClinGen |
 | PTPN11 MAVE scores | Jiang et al. 2025, *Nature Communications* (doi:10.1038/s41467-025-60641-3) |
 | PTEN MAVE scores (activity) | Mighell et al. 2018, *Am. J. Hum. Genet.* (doi:10.1016/j.ajhg.2018.03.018) |
-| PTEN MAVE scores (abundance) | Matreyek et al. 2021, *Genome Medicine* (doi:10.1186/s13073-021-00984-x) |
+| PTEN MAVE scores (abundance) | Matreyek et al. 2018, *Nature Genetics* (doi:10.1038/s41588-018-0122-z), obtained via the integrated dataset of Matreyek et al. 2021, *Genome Medicine* (doi:10.1186/s13073-021-00984-x) |
 | DDX3X MAVE scores | Radford et al. 2023, *Nature Communications* (doi:10.1038/s41467-023-43041-4) |
-| HRAS MAVE scores | Bandaru et al. 2017, *eLife* (doi:10.7554/eLife.27810) |
+| HRAS MAVE scores | Hidalgo et al. 2022, *eLife* (doi:10.7554/eLife.76595) |
 
 ---
 

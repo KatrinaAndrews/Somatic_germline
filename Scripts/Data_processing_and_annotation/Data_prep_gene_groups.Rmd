@@ -18,7 +18,7 @@ Steps:
 6. Expand train/test to long_uncontaminated form (train/test split on unique data, then expand)
 7. Export all train/test splits for ML model building
 
-Run script 4 (`Annating_with_clean_NumberSubmissions.Rmd`) before this script — it adds `NumberSubmitters_clean` (germline-only submission count) used here for long-form expansion.
+Run script 4 (`Annotating_with_clean_NumberSubmissions.Rmd`) before this script — it adds `NumberSubmitters_clean` (germline-only submission count) used here for long-form expansion.
 
 ```{r, message=FALSE}
 library(tidyverse)

@@ -105,8 +105,17 @@ MAVE_data_select <- MAVE_data %>%
   filter(!is.na(ref_aa)) %>%
   unique() %>%
   group_by(chrom, Protein_position, ref_aa, alt_aa) %>%
-  summarise(MAVE_score = max(NDD_clinical_classification_prob_var_nonfunctional),
-            .groups = "drop") %>%
+  # Maximum probability-of-non-function across replicates, discarding NAs.
+  # If every replicate is NA the variant has no usable score (kept as NA rather
+  # than the -Inf that max(na.rm = TRUE) would otherwise return).
+  summarise(
+    MAVE_score = if (all(is.na(NDD_clinical_classification_prob_var_nonfunctional))) {
+      NA_real_
+    } else {
+      max(NDD_clinical_classification_prob_var_nonfunctional, na.rm = TRUE)
+    },
+    .groups = "drop"
+  ) %>%
   mutate(codon_change = paste0(Protein_position, ref_aa, ">", Protein_position, alt_aa)) %>%
   dplyr::select(codon_change, MAVE_score)
 ```

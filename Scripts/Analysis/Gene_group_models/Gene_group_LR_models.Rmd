@@ -73,7 +73,7 @@ twoClassSummary_pathogenic <- function(data, lev = NULL, model = NULL) {
                        quiet     = TRUE)
   c(ROC  = as.numeric(pROC::auc(roc_obj)),
     Sens = caret::sensitivity(data$pred, data$obs, positive = "Pathogenic"),
-    Spec = caret::specificity(data$pred, data$obs, negative = "Pathogenic"))
+    Spec = caret::specificity(data$pred, data$obs, negative = "Benign"))
 }
 
 trctrl <- trainControl(

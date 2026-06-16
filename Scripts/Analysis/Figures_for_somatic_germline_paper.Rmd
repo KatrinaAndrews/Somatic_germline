@@ -65,7 +65,6 @@ dir.create("../../Data/Figures",                  recursive = TRUE, showWarnings
 
 Clinvar_vs_Biobank <- read_csv("../../Data/ML_model_input/Gene_group_models/Clinvar_vs_Biobank_unique_set1_240426.csv.gz")
 DNM_vs_Biobank     <- read_csv("../../Data/ML_model_input/Gene_group_models/DNM_vs_Biobank_unique_set1_240426.csv.gz")
-tmp_clinvar        <- read_tsv("../../Data/Variant_lists/Clinvar_DDG2P_missense_path_annot_260526_public.tsv.gz")
 ```
 
 ```{r, warning=FALSE, message=FALSE}
@@ -1037,7 +1036,20 @@ ggsave("../../Data/Figures/Final/COSMIC_codon_count_LR_plot.png", width = 9, hei
 
 ## Figure 5b: Auto-ACMG before and after somatic weighting (all pathogenicity classes)
 
-```{r, fig.width=7, fig.height=3}
+```{r, fig.width=8, fig.height=4}
+acmg_combined <- acmg_combined %>%
+  mutate(dataset = factor(dataset, 
+                          levels = c("Auto ACMG outcome after somatic weighting",
+                                     "Auto ACMG outcome before somatic weighting")))
+
+acmg_combined <- acmg_combined %>%
+  mutate(group = recode(group,
+                        "(likely) benign"     = "ClinVar (likely) benign",
+                        "VUS"                 = "ClinVar VUS",
+                        "Conflicting"         = "ClinVar Conflicting",
+                        "(likely) pathogenic" = "ClinVar (likely) pathogenic"))
+
+
 label_dat_all <- acmg_combined %>%
   count(dataset, group, acmg_class) %>%
   group_by(dataset, group) %>%
@@ -1045,21 +1057,26 @@ label_dat_all <- acmg_combined %>%
          label = ifelse(prop >= 0.04, as.character(n), ""))
 
 ggplot(acmg_combined,
-       aes(x = factor(group, levels = c("(likely) benign", "VUS", "Conflicting",
-                                        "(likely) pathogenic")),
-           fill = acmg_class)) +
+       aes(x = dataset, fill = acmg_class)) +
   geom_bar(position = "fill") +
   geom_text(data = label_dat_all,
             aes(y = prop, label = label),
             position = position_fill(vjust = 0.5),
             size = 3) +
   scale_fill_manual(values = acmg_colours) +
-  labs(x = "ClinVar class", fill = "", y = "Proportion") +
+  scale_x_discrete(labels = c("Auto ACMG outcome after somatic weighting"  = "After somatic weighting",
+                               "Auto ACMG outcome before somatic weighting" = "Before somatic weighting")) +
+  labs(x = "Auto-ACMG outcome", fill = "", y = "Proportion") +
   coord_flip() +
-  facet_wrap(~ dataset, ncol = 1)
+  facet_wrap(~ factor(group, levels = c("ClinVar (likely) benign", "ClinVar VUS", 
+                                        "ClinVar Conflicting", "ClinVar (likely) pathogenic")),
+             ncol = 1) +
+  theme(axis.title.y = element_text(angle = 90))
+
+
 
 ggsave("../../Data/Figures/Final/Ras_Auto_ACMG_before_after_somatic_weighting_all_classes.png",
-       width = 7, height = 3, units = "in", dpi = 300)
+       width = 8, height = 4, units = "in", dpi = 300)
 ```
 
 ---

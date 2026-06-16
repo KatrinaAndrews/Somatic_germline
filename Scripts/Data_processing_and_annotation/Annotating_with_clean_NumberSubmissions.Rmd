@@ -10,6 +10,8 @@ output:
 
 The `NumberSubmitters` column in the ClinVar variant files counts all submissions regardless of origin (germline and somatic). This script replaces it with a germline-only count (`NumberSubmitters_clean`) derived from the ClinVar submission summary, using a regex filter on the `OriginCounts` field.
 
+Variants in the **pathogenic** list that have no germline submissions at all (somatic-only entries) are removed entirely, so they do not contaminate the germline pathogenic variant list used downstream.
+
 This corrected count is used downstream in `Data_prep_gene_groups.Rmd` to weight variant representation in the long-form training data.
 
 ```{r, message=FALSE, warning=FALSE}
@@ -75,6 +77,19 @@ path_ids <- load_variation_ids(
 )
 
 clinvar_path_clean <- add_clean_nsub(clinvar_path, path_ids)
+
+# Remove somatic-only variants from the PATHOGENIC list. A variant with no
+# germline ClinVar submissions does not appear in `germline_counts`, so its
+# `NumberSubmitters_clean` is NA after the join. These are dropped entirely
+# (rather than floored to weight 1 in Data_prep_gene_groups.Rmd) so that
+# purely somatic ClinVar entries do not enter the germline pathogenic list.
+n_before <- nrow(clinvar_path_clean)
+clinvar_path_clean <- clinvar_path_clean %>%
+  filter(!is.na(NumberSubmitters_clean))
+cat(sprintf(
+  "Pathogenic list: removed %d of %d variants with 0 germline submissions (%d retained).\n",
+  n_before - nrow(clinvar_path_clean), n_before, nrow(clinvar_path_clean)
+))
 ```
 
 # Process benign variants
