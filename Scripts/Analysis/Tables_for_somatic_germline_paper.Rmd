@@ -142,11 +142,25 @@ DT::datatable(supp_table1,
 
 # Supplementary Table 2: AUC for each feature for each gene
 
-Single-feature AUC values for individual genes in both clinvar_unique and clinvar_count_weighted datasets.
+Single-feature AUC values for individual genes in both clinvar_unique and clinvar_count_weighted
+datasets, restricted to the same 705 benchmarking-eligible DD genes (>=10 unique pathogenic and
+>=10 unique benign ClinVar variants; Methods) in both dataset forms, so that the two partitions
+describe the same gene set and differ only in whether the reported AUC/metrics were computed on
+unique or count-weighted variant data.
 
 ```{r}
+# Same >=10 unique pathogenic / >=10 unique benign eligibility gate used
+# elsewhere (e.g. Numbers_for_somatic_germline_paper.Rmd's genes_with_10),
+# computed from n_vars_per_gene_clinvar (unique-variant counts only) so it is
+# independent of which dataset form (unique vs count-weighted) is being
+# reported for a given gene below.
+genes_with_10 <- n_vars_per_gene_clinvar %>%
+  filter(n_unique_pathogenic >= 10, n_benign >= 10) %>%
+  pull(gene)
+
 supp_table2 <- gene_AUCs_individual_features %>%
-  filter(dataset %in% c("clinvar_unique", "clinvar_count_weighted")) %>%
+  filter(dataset %in% c("clinvar_unique", "clinvar_count_weighted"),
+         gene %in% genes_with_10) %>%
   dplyr::select(gene, dataset, everything())
 
 write_csv(supp_table2, "../../Data/Tables/Supplementary_Table2.csv")
@@ -207,20 +221,128 @@ DT::datatable(supp_table5,
 
 ---
 
-# Supplementary Table 6: Likelihood ratios for somatic feature cutoffs
+# Supplementary Table 6: Gene-heterogeneity model -- functional enrichment results
 
-Positive and negative likelihood ratios for COSMIC and Nanoseq feature thresholds across all four pathogenic variant dataset forms (ClinVar count-weighted and unique, and de novo mutation count-weighted and unique).
+Odds ratios (Haldane-corrected, single shared BH-FDR domain) for every GO:BP,
+GO:MF, PANTHER protein-class, and BioCarta term tested for enrichment between
+somatic-data-informative and non-informative genes (source: gene-level
+heterogeneity model, `Scripts/Analysis/Gene_heterogeneity_model/Functional_enrichment.Rmd`).
 
 ```{r}
-supp_table6 <- LR %>%
-  filter(data_set %in% c("clinvar_long_public", "clinvar_unique_public",
-                         "DNMs_31k_long_public", "DNMs_31k_unique_public")) %>%
-  arrange(data_set, gene_group, feature)
+gene_het_enrich <- read_csv("../../Data/ML_model_input/gene_heterogeneity_enrichment_terms_all_sources.csv")
+
+supp_table6 <- gene_het_enrich %>%
+  transmute(source, term_id, term_name,
+            n_informative_with_term = informative,
+            n_informative_without_term = b,
+            n_noninformative_with_term = non_informative,
+            n_noninformative_without_term = d,
+            pct_informative_with_term = pct_info,
+            pct_noninformative_with_term = pct_noninfo,
+            odds_ratio = OR, or_ci_low = or_lo, or_ci_high = or_hi,
+            p_value = p, q_value_BH = q) %>%
+  arrange(source, q_value_BH)
 
 write_csv(supp_table6, "../../Data/Tables/Supplementary_Table6.csv")
 
 DT::datatable(supp_table6,
-              caption = "Supplementary Table 6: Likelihood ratios",
+              caption = "Supplementary Table 6: Gene-heterogeneity model functional enrichment (all terms tested)",
+              filter = "top", rownames = FALSE,
+              options = list(pageLength = 20, scrollX = TRUE))
+```
+
+---
+
+# Supplementary Table 7: Gene-heterogeneity model -- per-gene features and predictions
+
+Feature values and model-predicted probability of high somatic-data utility for
+all 970 monoallelic DD genes -- not restricted to the benchmarking-eligible
+subset, since none of the model's features require ClinVar variant counts to
+compute. `training_label` indicates whether the gene was used to fit the model
+(`positive`/`negative`, per the COSMIC AUC threshold, restricted to
+benchmarking-eligible genes) or was an unlabelled "grey-zone" gene scored by
+the fitted model (`grey`; includes genes with too few, or zero, ClinVar
+variants to benchmark individually)
+(source: `Scripts/Analysis/Gene_heterogeneity_model/Gene_utility_model.Rmd`).
+
+```{r}
+gene_het_pred <- read_csv("../../Data/ML_model_input/gene_heterogeneity_predictions.csv")
+
+supp_table7 <- gene_het_pred %>%
+  transmute(gene, training_label = label,
+            cosmic_auc = auc, cosmic_auc_lower = auc_lower, cosmic_auc_upper = auc_upper,
+            dd_altfunc, dd_lof, cancer_oncogene_missense, cancer_tsg,
+            loeuf, moeuf, exp_mis, hotspot_count, net_contrast,
+            constraint_missing, network_missing,
+            pred_prob_high_utility = pred_prob) %>%
+  arrange(desc(pred_prob_high_utility))
+
+write_csv(supp_table7, "../../Data/Tables/Supplementary_Table7.csv")
+
+DT::datatable(supp_table7,
+              caption = "Supplementary Table 7: Gene-heterogeneity model per-gene features and predictions",
+              filter = "top", rownames = FALSE,
+              options = list(pageLength = 20, scrollX = TRUE))
+```
+
+---
+
+# Supplementary Table 8: Gene-heterogeneity model -- feature dictionary and importance
+
+Definition and data source for each model feature, alongside its random-forest
+SHAP importance and ridge-logistic-regression odds ratio (source: `Gene_utility_model.Rmd`).
+
+```{r}
+gene_het_shap <- read_csv("../../Data/ML_model_input/gene_heterogeneity_shap_summary.csv")
+gene_het_or   <- read_csv("../../Data/ML_model_input/gene_heterogeneity_ridge_or.csv")
+
+feature_dict <- tribble(
+  ~feature,                    ~description,                                                                                          ~data_source,
+  "dd_altfunc",                 "Gene has a monoallelic DDG2P disease association with an altered-function mechanism (variant_consequence includes altered gene product structure)", "DDG2P",
+  "dd_lof",                     "Gene has a monoallelic DDG2P disease association with a loss-of-function mechanism (variant_consequence includes absent or decreased gene product)", "DDG2P",
+  "cancer_oncogene_missense",   "COSMIC Cancer Gene Census annotates the gene as an oncogene with missense driver mutations",                                                       "COSMIC Cancer Gene Census v98",
+  "cancer_tsg",                 "COSMIC Cancer Gene Census annotates the gene as a tumour suppressor gene",                                                                          "COSMIC Cancer Gene Census v98",
+  "loeuf",                      "gnomAD loss-of-function observed/expected upper bound fraction (constraint against LOF variation)",                                                "gnomAD v4.1 constraint metrics",
+  "moeuf",                      "gnomAD missense observed/expected ratio (constraint against missense variation)",                                                                  "gnomAD v4.1 constraint metrics",
+  "exp_mis",                    "gnomAD expected missense variant count (proxy for mutability and coding sequence length)",                                                         "gnomAD v4.1 constraint metrics",
+  "hotspot_count",               "Number of recurrent somatic mutation hotspot residues listed for the gene (raw count, not length-normalised)",                                    "cancerhotspots.org v2",
+  "net_contrast",               "log10 ratio of random-walk-with-restart proximity (STRING PPI) to the positive-labelled gene network vs. the negative-labelled gene network; leave-one-out for labelled genes", "STRING v12 PPI"
+)
+
+supp_table8 <- feature_dict %>%
+  left_join(gene_het_shap, by = "feature") %>%
+  left_join(gene_het_or %>% rename(feature = term, ridge_or = estimate,
+                                    ridge_or_ci_low = conf.low, ridge_or_ci_high = conf.high),
+            by = "feature") %>%
+  transmute(feature, description, data_source,
+            mean_abs_shap = mean_abs, shap_direction_corr = direction_corr,
+            ridge_or, ridge_or_ci_low, ridge_or_ci_high) %>%
+  arrange(desc(mean_abs_shap))
+
+write_csv(supp_table8, "../../Data/Tables/Supplementary_Table8.csv")
+
+DT::datatable(supp_table8,
+              caption = "Supplementary Table 8: Gene-heterogeneity model feature dictionary and importance",
+              filter = "top", rownames = FALSE,
+              options = list(pageLength = 20, scrollX = TRUE))
+```
+
+---
+
+# Supplementary Table 9: Likelihood ratios for somatic feature cutoffs
+
+Positive and negative likelihood ratios for COSMIC and Nanoseq feature thresholds across all four pathogenic variant dataset forms (ClinVar count-weighted and unique, and de novo mutation count-weighted and unique).
+
+```{r}
+supp_table9 <- LR %>%
+  filter(data_set %in% c("clinvar_long_public", "clinvar_unique_public",
+                         "DNMs_31k_long_public", "DNMs_31k_unique_public")) %>%
+  arrange(data_set, gene_group, feature)
+
+write_csv(supp_table9, "../../Data/Tables/Supplementary_Table9.csv")
+
+DT::datatable(supp_table9,
+              caption = "Supplementary Table 9: Likelihood ratios",
               filter = "top", rownames = FALSE,
               options = list(pageLength = 20, scrollX = TRUE))
 ```

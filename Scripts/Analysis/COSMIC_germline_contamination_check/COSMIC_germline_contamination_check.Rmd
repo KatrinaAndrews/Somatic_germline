@@ -1,0 +1,575 @@
+---
+title: "COSMIC germline-contamination check"
+subtitle: "Matched-normal confirmation status of ClinVar pathogenic and UK Biobank benign variants in COSMIC"
+output:
+  html_document:
+    df_print: paged
+    code_folding: hide
+    toc: true
+    toc_float: true
+---
+
+# Background
+
+Somatic mutation frequency in COSMIC is used elsewhere in this project as a
+predictor of pathogenicity for missense variants in dominant developmental
+disorder genes. This rests on the assumption that COSMIC's variant calls are
+genuinely somatic. In practice, not every tumour sample deposited in COSMIC
+was sequenced alongside matched germline (normal-tissue) material. Where
+matched-normal sequencing was not performed, COSMIC still records the
+variant, but labels it **"Variant of unknown origin"** rather than
+**"Confirmed somatic variant"** (COSMIC's own terminology). A variant of
+unknown origin could in principle be an unrecognised germline variant
+present in the tumour rather than a true somatic event.
+
+This analysis quantifies, for every dominant DDG2P gene with sufficient
+ClinVar and population data to be benchmarked elsewhere in this project, the
+proportion of COSMIC's own depositions of the *exact* variants used as
+pathogenic and benign evidence that carry matched-normal confirmation.
+Restricting the check to the exact variants used as evidence — rather than
+any COSMIC variant occurring in the same gene, or at the same codon —
+directly addresses how much of the specific evidence relied on could be
+germline contamination, rather than a broader statement about mutation
+recurrence in these genes.
+
+Variants are matched between COSMIC and the reference variant sets by
+genomic coordinate and allele identity (chromosome, position, reference
+allele, mutant allele) on the GRCh38 assembly, rather than by transcript and
+codon number. Genomic coordinates and alleles are a property of the
+reference assembly rather than of any one transcript model, so this
+avoids the need to reconcile differing transcript annotations between
+independently generated variant call sets.
+
+# Data sources
+
+| Input | Path | Description |
+|---|---|---|
+| COSMIC targeted-screen mutation export | `Data/Cancer_data/Cosmic_CompleteTargetedScreensMutant_Tsv_v101_GRCh38.tar` | One row per variant per tumour sample from targeted gene-panel studies (COSMIC v101, GRCh38). Includes both positive and negative screening results (`POSITIVE_SCREEN`), flagged per row. |
+| COSMIC genome-screen mutation export | `Data/Cancer_data/Cosmic_GenomeScreensMutant_Tsv_v101_GRCh38.tar` | Same granularity, from whole-genome/exome studies. Contains positive screening results only. |
+| ClinVar pathogenic/likely pathogenic variants | `Data/Variant_lists/Clinvar_DDG2P_missense_path_annot_260526_public.tsv.gz` | Missense ClinVar Pathogenic/Likely Pathogenic calls for dominant DDG2P genes, with genomic coordinates (GRCh38). |
+| UK Biobank benign variants | `Data/Variant_lists/Biobank_missense_variants_annot_260526_public.tsv.gz` | Population-frequency-filtered benign-germline missense calls, same schema. |
+| Gene benchmarking status | `Data/AUC_tables/Gene_group_hold_out_models/Single_feature_AUCs_individual_genes_240426.csv`, `Data/AUC_tables/Gene_group_hold_out_models/Variant_counts_per_gene_240426.csv`, `Data/ML_model_input/gene_heterogeneity_feature_matrix.csv` | Per-gene AUC and variant counts defining benchmarking eligibility and the "positive"/"negative"/"grey" somatic-utility labels (monoallelic DD genes only). |
+| Somatic-informative gene set | `Data/Tables/Supplementary_Table2.csv` | Defines the 145 genes for which somatic data are informative (any inheritance pattern), the primary gene set reported by this check. |
+
+```{r setup, message=FALSE, warning=FALSE}
+library(tidyverse)
+theme_set(theme_bw(12))
+knitr::opts_chunk$set(warning = FALSE, message = FALSE, cache = TRUE, autodep = TRUE)
+
+DATA_DIR     <- "../../../Data"
+GENOME_TAR   <- file.path(DATA_DIR, "Cancer_data/Cosmic_GenomeScreensMutant_Tsv_v101_GRCh38.tar")
+TARGETED_TAR <- file.path(DATA_DIR, "Cancer_data/Cosmic_CompleteTargetedScreensMutant_Tsv_v101_GRCh38.tar")
+PATH_FILE    <- file.path(DATA_DIR, "Variant_lists/Clinvar_DDG2P_missense_path_annot_260526_public.tsv.gz")
+BENIGN_FILE  <- file.path(DATA_DIR, "Variant_lists/Biobank_missense_variants_annot_260526_public.tsv.gz")
+AUC_FILE     <- file.path(DATA_DIR, "AUC_tables/Gene_group_hold_out_models/Single_feature_AUCs_individual_genes_240426.csv")
+VC_FILE      <- file.path(DATA_DIR, "AUC_tables/Gene_group_hold_out_models/Variant_counts_per_gene_240426.csv")
+FEAT_FILE    <- file.path(DATA_DIR, "ML_model_input/gene_heterogeneity_feature_matrix.csv")
+
+OUT_OVERALL     <- file.path(DATA_DIR, "ML_model_input/cosmic_germline_contamination_overall.csv")
+OUT_OVERALL_POS <- file.path(DATA_DIR, "ML_model_input/cosmic_germline_contamination_overall_positive_only.csv")
+OUT_OVERALL_145 <- file.path(DATA_DIR, "ML_model_input/cosmic_germline_contamination_overall_145_informative.csv")
+OUT_PER_GENE    <- file.path(DATA_DIR, "ML_model_input/cosmic_germline_contamination_per_gene.csv")
+OUT_PER_GENE_145 <- file.path(DATA_DIR, "ML_model_input/cosmic_germline_contamination_per_gene_145_informative.csv")
+OUT_SUPP_TABLE  <- file.path(DATA_DIR, "ML_model_input/cosmic_germline_contamination_supplementary_table.csv")
+OUT_FIG         <- file.path(DATA_DIR, "Figures/Final/Supplement/COSMIC_germline_contamination_check.png")
+
+for (f in c(GENOME_TAR, TARGETED_TAR, PATH_FILE, BENIGN_FILE, AUC_FILE, VC_FILE, FEAT_FILE,
+            file.path(DATA_DIR, "Tables/Supplementary_Table2.csv")))
+  if (!file.exists(f)) stop("Required input not found: ", f)
+```
+
+# 1. Gene set
+
+Analysis is restricted to dominant (monoallelic) DDG2P genes that are
+**benchmarking-eligible**: at least 10 unique ClinVar Pathogenic/Likely
+Pathogenic missense variants and at least 10 unique UK Biobank
+benign-germline missense variants. This is the same eligibility criterion
+used to define somatic-utility labels elsewhere in this project, applied
+here directly from its source tables. Each eligible gene carries its
+"positive" (COSMIC-codon-count AUC lower 95% CI > 0.70), "negative" (upper
+95% CI < 0.60), or "grey" (neither) somatic-utility label as an annotation;
+every eligible gene is otherwise treated identically throughout.
+
+The primary gene set reported by this check (Section 5.2b, Discussion) is
+broader than this monoallelic set: the 145 genes for which somatic data are
+informative (Supplementary Table 2; AUC lower 95% CI > 0.6 for at least one
+of COSMIC, sperm, or buccal missense codon count, count-weighted ClinVar
+form), which includes 48 genes with a biallelic or X-linked hemizygous
+inheritance pattern not covered by the monoallelic set above. COSMIC
+matching (Section 3) is run once, across the union of both gene sets.
+
+```{r genes}
+auc <- read_csv(AUC_FILE, show_col_types = FALSE) %>%
+  filter(Predictor == "n_COSMIC_codon_count", dataset == "clinvar_long") %>%
+  transmute(gene = trimws(gene), auc_lower = AUC_full_lower)
+vc <- read_csv(VC_FILE, show_col_types = FALSE) %>%
+  filter(data_set == "clinvar_mutation_data_unique") %>%
+  transmute(gene = trimws(gene), n_path_unique = n_path_variants, n_benign_unique = n_benign_variants)
+feat <- read_csv(FEAT_FILE, show_col_types = FALSE)
+
+gene_universe <- feat %>% select(gene, label) %>%
+  left_join(auc, by = "gene") %>%
+  left_join(vc, by = "gene") %>%
+  mutate(eligible = !is.na(auc_lower) & !is.na(n_path_unique) & !is.na(n_benign_unique) &
+           n_path_unique >= 10 & n_benign_unique >= 10)
+
+genes_eligible <- gene_universe %>% filter(eligible) %>% pull(gene)
+genes_positive <- gene_universe %>% filter(eligible, label == "positive") %>% pull(gene)
+genes_negative <- gene_universe %>% filter(eligible, label == "negative") %>% pull(gene)
+
+cat("Benchmarking-eligible genes:", length(genes_eligible), "\n")
+cat("  of which positive (somatic-informative):", length(genes_positive), "\n")
+cat("  of which negative (contrast):", length(genes_negative), "\n")
+cat("  of which grey:", length(genes_eligible) - length(genes_positive) - length(genes_negative), "\n")
+
+# The 145 genes for which somatic data are informative (Results, "Somatic
+# data predicts germline pathogenicity in DD genes"): benchmarking-eligible
+# DD genes (>=10 unique pathogenic and >=10 unique benign ClinVar variants,
+# any inheritance pattern -- not restricted to monoallelic as `genes_eligible`
+# above is) with a count-weighted-ClinVar AUC lower 95% CI > 0.6 for at least
+# one of COSMIC, sperm NanoSeq, or buccal NanoSeq missense codon count.
+# Reproduced directly from Supplementary Table 2 for consistency.
+ST2_FILE <- file.path(DATA_DIR, "Tables/Supplementary_Table2.csv")
+st2 <- read_csv(ST2_FILE, show_col_types = FALSE) %>% filter(dataset == "clinvar_count_weighted")
+qualifying_genes <- function(predictor) {
+  st2 %>% filter(Predictor == predictor, !is.na(AUC_full_lower), AUC_full_lower > 0.6) %>% pull(gene)
+}
+genes_145 <- union(union(qualifying_genes("n_COSMIC_codon_count"), qualifying_genes("n_sperm_codon_count")),
+                    qualifying_genes("n_buccal_codon_count"))
+cat("\nGenes for which somatic data are informative (Supplementary Table 2):", length(genes_145), "\n")
+cat("  of which already in the monoallelic benchmarking-eligible set above:",
+    length(intersect(genes_145, genes_eligible)), "\n")
+cat("  of which not monoallelic-eligible above (biallelic/hemizygous; need separate COSMIC matching):",
+    length(setdiff(genes_145, genes_eligible)), "\n")
+
+# Union of genes to scan COSMIC for: the monoallelic benchmarking-eligible
+# set already needed for genes_eligible/genes_positive/genes_negative above,
+# plus the (typically biallelic/hemizygous) genes in genes_145 not already
+# covered by that set. Everything downstream that filters on genes_eligible
+# or genes_positive is unaffected; a new section below reports genes_145.
+genes_scan_all <- union(genes_eligible, genes_145)
+cat("Total genes to scan COSMIC for:", length(genes_scan_all), "\n")
+```
+
+# 2. Reference variant sets
+
+ClinVar pathogenic and UK Biobank benign variants are represented by their
+genomic coordinates and alleles (chromosome, position, reference allele,
+mutant allele; GRCh38), restricted to benchmarking-eligible genes. COSMIC's
+own chromosome field omits the `chr` prefix used in the reference files, so
+the prefix is stripped for consistency.
+
+```{r lookup}
+path_lookup <- read_tsv(PATH_FILE, show_col_types = FALSE,
+                         col_select = c(gene, chrom, pos, ref, alt)) %>%
+  filter(gene %in% genes_scan_all) %>%
+  mutate(chrom = str_remove(chrom, "^chr")) %>%
+  distinct(gene, chrom, pos, ref, alt)
+benign_lookup <- read_tsv(BENIGN_FILE, show_col_types = FALSE,
+                           col_select = c(gene, chrom, pos, ref, alt)) %>%
+  filter(gene %in% genes_scan_all) %>%
+  mutate(chrom = str_remove(chrom, "^chr")) %>%
+  distinct(gene, chrom, pos, ref, alt)
+
+cat("Distinct ClinVar P/LP variants:", nrow(path_lookup), "\n")
+cat("Distinct biobank-benign variants:", nrow(benign_lookup), "\n")
+cat("Scanned genes with zero ClinVar P/LP variants:\n  ",
+    paste(setdiff(genes_scan_all, unique(path_lookup$gene)), collapse = ", "), "\n")
+cat("Scanned genes with zero biobank-benign variants:\n  ",
+    paste(setdiff(genes_scan_all, unique(benign_lookup$gene)), collapse = ", "), "\n")
+```
+
+# 3. COSMIC mutation records and variant matching
+
+Each COSMIC export is streamed directly from its compressed archive without
+being written to disk, and filtered in a single pass to rows whose gene
+symbol is one of the benchmarking-eligible genes and whose genomic
+coordinate and allele exactly match one of the combined ClinVar or
+biobank-benign reference variants. The reference variant sets are already
+restricted to missense substitutions, so an exact coordinate-and-allele
+match to either set guarantees the COSMIC record represents the same
+missense substitution, independent of whichever consequence annotation
+COSMIC itself assigned to that particular record.
+
+For the targeted-screen export, records are additionally required to have
+`POSITIVE_SCREEN == "y"`: this file reports both variants actually observed
+in a sample and negative screening results (a gene tested and found
+unmutated in that sample), the latter making up the majority of rows and
+carrying no variant information. The genome-screen export contains positive
+results only.
+
+Both COSMIC exports use CRLF line endings, so the final tab-delimited field
+on each row carries a trailing carriage return that is stripped prior to
+comparison. Column identities (gene symbol, somatic-status annotation,
+chromosome, position, reference and mutant allele, sample identifier, and,
+for the targeted-screen file, the screening-result flag) are located by
+pattern-matching each file's own header rather than by fixed column index,
+so the pipeline is robust to COSMIC schema changes across releases.
+
+Genomic alleles in COSMIC are reported on the forward reference strand
+regardless of the annotated gene's own strand. This was verified directly
+for a plus-strand gene and a minus-strand gene prior to matching, confirming
+that no strand complementation is required when comparing COSMIC alleles to
+the reference variant sets.
+
+```{r load-cosmic-helper}
+gene_list_file <- tempfile()
+write_lines(genes_scan_all, gene_list_file)
+
+variant_key_file <- tempfile()
+combined_keys <- unique(c(
+  paste(path_lookup$chrom, path_lookup$pos, path_lookup$ref, path_lookup$alt, sep = "_"),
+  paste(benign_lookup$chrom, benign_lookup$pos, benign_lookup$ref, benign_lookup$alt, sep = "_")
+))
+write_lines(combined_keys, variant_key_file)
+cat("Combined distinct (chrom,pos,ref,alt) keys to match against:", length(combined_keys), "\n")
+
+load_cosmic_tar <- function(tar_path, screen_type) {
+  members <- system(sprintf("tar -tf %s", shQuote(tar_path)), intern = TRUE)
+  tsv_member <- members[str_detect(members, "\\.tsv\\.gz$")]
+  stopifnot("expected exactly one .tsv.gz member in the tar" = length(tsv_member) == 1)
+  stream_cmd <- sprintf("tar -xOf %s %s | gzip -dc", shQuote(tar_path), shQuote(tsv_member))
+
+  header <- read_lines(pipe(stream_cmd), n_max = 1)
+  raw_cols <- str_split(str_remove(header, "\r$"), "\t")[[1]]
+
+  gene_col_idx    <- which(str_detect(tolower(raw_cols), "^gene[ _]?(name|symbol)$"))
+  status_col_idx  <- which(str_detect(tolower(raw_cols), "somatic") & str_detect(tolower(raw_cols), "status"))
+  chr_col_idx     <- which(str_detect(tolower(raw_cols), "^chromosome$"))
+  pos_col_idx     <- which(str_detect(tolower(raw_cols), "^genome.?start$"))
+  wt_col_idx      <- which(str_detect(tolower(raw_cols), "genomic.*wt.*allele"))
+  mut_col_idx     <- which(str_detect(tolower(raw_cols), "genomic.*mut.*allele"))
+  sample_col_idx  <- which(str_detect(tolower(raw_cols), "^cosmic.?sample.?id$"))
+  ps_col_idx      <- which(str_detect(tolower(raw_cols), "positive.?screen"))
+
+  stopifnot("gene column ambiguous/not found" = length(gene_col_idx) == 1,
+            "somatic-status column ambiguous/not found" = length(status_col_idx) == 1,
+            "chromosome column ambiguous/not found" = length(chr_col_idx) == 1,
+            "genome-start column ambiguous/not found" = length(pos_col_idx) == 1,
+            "genomic-WT-allele column ambiguous/not found" = length(wt_col_idx) == 1,
+            "genomic-MUT-allele column ambiguous/not found" = length(mut_col_idx) == 1,
+            "COSMIC-sample-ID column ambiguous/not found" = length(sample_col_idx) == 1)
+  cat(sprintf("[%s] gene=%s status=%s chrom=%s pos=%s wt=%s mut=%s sample=%s positive_screen=%s\n", screen_type,
+              raw_cols[gene_col_idx], raw_cols[status_col_idx], raw_cols[chr_col_idx], raw_cols[pos_col_idx],
+              raw_cols[wt_col_idx], raw_cols[mut_col_idx], raw_cols[sample_col_idx],
+              if (length(ps_col_idx) == 1) raw_cols[ps_col_idx] else "(none - positive results only)"))
+
+  sel_idx <- c(gene_col_idx, status_col_idx, chr_col_idx, pos_col_idx, wt_col_idx, mut_col_idx, sample_col_idx)
+  awk_print <- paste(sprintf("$%d", sel_idx), collapse = ", ")
+  ps_filter <- if (length(ps_col_idx) == 1) sprintf(" && $%d == \"y\"", ps_col_idx) else ""
+  key_expr <- sprintf("$%d\"_\"$%d\"_\"$%d\"_\"$%d", chr_col_idx, pos_col_idx, wt_col_idx, mut_col_idx)
+
+  cmd <- sprintf(
+    paste0(
+      "%s | awk -F'\\t' -v gcol=%d -v genefile=%s -v variantfile=%s ",
+      "'BEGIN{OFS=\"\\t\"; while((getline line < genefile) > 0) genes[line]=1; ",
+      "while((getline line < variantfile) > 0) variants[line]=1} ",
+      "{sub(/\\r$/,\"\",$NF)} ",
+      "NR==1{print %s; next} ",
+      "($gcol in genes) && ((%s) in variants)%s {print %s}'"
+    ),
+    stream_cmd, gene_col_idx, shQuote(gene_list_file), shQuote(variant_key_file),
+    awk_print, key_expr, ps_filter, awk_print
+  )
+
+  dat <- read_tsv(pipe(cmd), show_col_types = FALSE, col_types = cols(.default = "c"))
+  names(dat) <- c("gene", "somatic_status", "chrom", "pos", "ref", "alt", "cosmic_sample_id")
+  dat %>% mutate(screen_type = screen_type, pos = as.integer(pos))
+}
+```
+
+```{r load-cosmic-targeted}
+targeted <- load_cosmic_tar(TARGETED_TAR, "targeted")
+cat("Targeted-screen exact-variant matches (pre-deduplication):", nrow(targeted), "\n")
+```
+
+```{r load-cosmic-genome}
+genome <- load_cosmic_tar(GENOME_TAR, "genome")
+cat("Genome-screen exact-variant matches (pre-deduplication):", nrow(genome), "\n")
+```
+
+# 4. Deduplication of transcript-redundant records
+
+COSMIC reports a single variant observed in a single tumour sample once for
+each transcript the variant is annotated against, so a given
+sample-and-variant combination can appear as multiple records in the raw
+export. Because matching is performed on genomic coordinate and allele
+rather than transcript, each such group of records would otherwise be
+counted as multiple independent depositions. Records are therefore
+deduplicated to one row per combination of variant and COSMIC sample
+identifier prior to any tabulation, so that counts reflect the number of
+tumours in which a variant was observed. The somatic-status annotation is
+invariant across the duplicate transcript-level records for a given sample
+and is retained unchanged.
+
+```{r dedup}
+dedup_by_sample <- function(dat, screen_type) {
+  n_before <- nrow(dat)
+  dat <- dat %>% distinct(chrom, pos, ref, alt, cosmic_sample_id, .keep_all = TRUE) %>%
+    select(-cosmic_sample_id)
+  cat(sprintf("[%s] records before deduplication: %d; after: %d\n", screen_type, n_before, nrow(dat)))
+  dat
+}
+targeted <- dedup_by_sample(targeted, "targeted")
+genome   <- dedup_by_sample(genome, "genome")
+```
+
+# 5. Tabulation
+
+```{r overlap}
+cosmic <- bind_rows(targeted, genome)
+cat("Combined exact-variant depositions across both COSMIC exports:", nrow(cosmic), "\n")
+cat("Distinct somatic-status categories observed:\n")
+cosmic %>% count(somatic_status, sort = TRUE) %>% knitr::kable()
+
+path_hits   <- cosmic %>% inner_join(path_lookup,   by = c("gene", "chrom", "pos", "ref", "alt")) %>% mutate(class = "ClinVar P/LP")
+benign_hits <- cosmic %>% inner_join(benign_lookup, by = c("gene", "chrom", "pos", "ref", "alt")) %>% mutate(class = "Biobank benign")
+overlap <- bind_rows(path_hits, benign_hits)
+
+cat("\nDepositions matching a ClinVar P/LP variant:", nrow(path_hits), "\n")
+cat("Depositions matching a biobank-benign variant:", nrow(benign_hits), "\n")
+cat("Positive genes with no COSMIC depositions in either class:\n  ",
+    paste(setdiff(genes_positive, unique(overlap$gene)), collapse = ", "), "\n")
+```
+
+## 5.1 All benchmarking-eligible genes
+
+```{r overall}
+overall <- overlap %>% count(class, somatic_status) %>%
+  group_by(class) %>% mutate(pct = round(100 * n / sum(n), 1)) %>%
+  arrange(class, desc(n)) %>% ungroup()
+overall %>% knitr::kable(caption = sprintf("All %d benchmarking-eligible genes", length(genes_eligible)))
+write_csv(overall, OUT_OVERALL)
+```
+
+## 5.2 Positive genes only
+
+```{r overall-positive}
+overall_pos <- overlap %>% filter(gene %in% genes_positive) %>%
+  count(class, somatic_status) %>%
+  group_by(class) %>% mutate(pct = round(100 * n / sum(n), 1)) %>%
+  arrange(class, desc(n)) %>% ungroup()
+overall_pos %>% knitr::kable(caption = sprintf("The %d somatic-informative (positive) genes only", length(genes_positive)))
+write_csv(overall_pos, OUT_OVERALL_POS)
+```
+
+## 5.2b The 145 genes for which somatic data are informative
+
+This is the primary gene set used to report this check in the manuscript
+(Results, Section 3.2): the 145 genes for which somatic data are informative
+more broadly (Supplementary Table 2; AUC lower 95% CI > 0.6 for at least one
+of COSMIC, sperm, or buccal missense codon count), rather than the narrower
+40-gene confident-positive set used above.
+
+```{r overall-145}
+overall_145 <- overlap %>% filter(gene %in% genes_145) %>%
+  count(class, somatic_status) %>%
+  group_by(class) %>% mutate(pct = round(100 * n / sum(n), 1)) %>%
+  arrange(class, desc(n)) %>% ungroup()
+overall_145 %>% knitr::kable(caption = sprintf("The %d genes for which somatic data are informative", length(genes_145)))
+write_csv(overall_145, OUT_OVERALL_145)
+```
+
+## 5.3 Per-gene results, positive genes
+
+```{r per-gene}
+per_gene <- overlap %>% filter(gene %in% genes_positive) %>%
+  count(gene, class, somatic_status) %>%
+  group_by(gene, class) %>%
+  mutate(pct = round(100 * n / sum(n), 1), n_total = sum(n)) %>%
+  ungroup()
+write_csv(per_gene, OUT_PER_GENE)
+
+per_gene %>% filter(class == "ClinVar P/LP", somatic_status == "Variant of unknown origin") %>%
+  select(gene, n_total, n_unknown = n, pct_unknown = pct) %>%
+  arrange(desc(pct_unknown)) %>%
+  knitr::kable(caption = "Positive genes with at least one unknown-origin deposition, ranked by percentage (genes not listed had none)")
+```
+
+## 5.3b Per-gene results, the 145 informative genes
+
+```{r per-gene-145}
+per_gene_145 <- overlap %>% filter(gene %in% genes_145) %>%
+  count(gene, class, somatic_status) %>%
+  group_by(gene, class) %>%
+  mutate(pct = round(100 * n / sum(n), 1), n_total = sum(n)) %>%
+  ungroup()
+write_csv(per_gene_145, OUT_PER_GENE_145)
+
+per_gene_145 %>% filter(class == "ClinVar P/LP", somatic_status == "Variant of unknown origin") %>%
+  select(gene, n_total, n_unknown = n, pct_unknown = pct) %>%
+  arrange(desc(pct_unknown)) %>%
+  knitr::kable(caption = "Informative-set genes with at least one unknown-origin deposition, ranked by percentage (genes not listed had none)")
+```
+
+## 5.4 Figure
+
+```{r figure, fig.width=11, fig.height=9}
+status_colours <- c(
+  "Confirmed somatic variant"                    = "#117733",
+  "Variant of unknown origin"                    = "#CC6677",
+  "Reported in another cancer sample as somatic" = "#88CCEE",
+  "Confirmed germline variant"                   = "#332288"
+)
+present <- unique(overlap$somatic_status)
+unmapped <- setdiff(present, names(status_colours))
+if (length(unmapped) > 0) {
+  cat("Somatic-status categories not in the standard palette (shown in grey):\n  ", paste(unmapped, collapse = ", "), "\n")
+  status_colours <- c(status_colours, setNames(rep("#888888", length(unmapped)), unmapped))
+}
+
+zero_unknown_genes <- setdiff(unique(per_gene$gene[per_gene$class == "ClinVar P/LP"]),
+                               per_gene$gene[per_gene$class == "ClinVar P/LP" & per_gene$somatic_status == "Variant of unknown origin"])
+gene_order <- c(zero_unknown_genes,
+                per_gene %>% filter(class == "ClinVar P/LP", somatic_status == "Variant of unknown origin") %>%
+                  arrange(pct) %>% pull(gene))
+
+fig <- per_gene %>% mutate(gene = factor(gene, levels = gene_order)) %>%
+  ggplot(aes(x = gene, y = n, fill = somatic_status)) +
+  geom_col(position = "fill", width = 0.75) +
+  scale_fill_manual(values = status_colours, name = "COSMIC somatic status") +
+  scale_y_continuous(labels = scales::percent) +
+  coord_flip() +
+  facet_wrap(~class, ncol = 2) +
+  labs(title = "Somatic-status composition of COSMIC depositions of exact ClinVar P/LP\nand biobank-benign variants",
+       subtitle = "Somatic-informative (positive) genes, ordered by percentage of unknown-origin depositions (ClinVar P/LP panel)",
+       x = NULL, y = "Percentage of COSMIC depositions") +
+  theme(legend.position = "bottom", axis.text.y = element_text(size = 7))
+ggsave(OUT_FIG, fig, width = 11, height = 9, dpi = 300)
+fig
+```
+
+# 6. Supplementary table
+
+One row per one of the 145 genes for which somatic data are informative
+(Supplementary Table 2), giving the ClinVar P/LP and biobank-benign
+breakdowns side by side. `auc_lower` is the highest AUC lower 95% confidence
+bound across the three somatic features considered for that gene set
+(COSMIC, sperm, or buccal missense codon count; count-weighted ClinVar
+form), and `qualifying_feature` names which feature achieved it;
+`utility_label` carries the monoallelic model's "positive"/"negative"/"grey"
+somatic-utility label where available (Section 1) and is `NA` for the 48
+genes with a biallelic or X-linked hemizygous inheritance pattern, which
+were not part of that (monoallelic-only) model. `n_total` is the total
+number of COSMIC depositions of that gene's own reference variants (ClinVar
+P/LP or biobank-benign, respectively); `n_unknown` is how many of those are
+"Variant of unknown origin"; `pct_unknown` is the corresponding percentage,
+left as `NA` where `n_total == 0` rather than reported as a misleading 0%.
+`low_n_path`/`low_n_benign` flag genes with fewer than 10 total depositions
+in that class, the same threshold used elsewhere in this project to define
+benchmarking eligibility, since percentages computed from very few
+depositions are unstable. Genes with zero COSMIC evidence in *both* classes
+are excluded from the table, as there is nothing to report for them; a gene
+with evidence in only one class retains its row. The table is ordered by
+`auc_lower` descending, so that genes with the strongest claimed
+somatic-data utility are listed first regardless of how much supporting
+COSMIC evidence exists for them individually.
+
+```{r supp-table}
+supp_base <- overlap %>%
+  count(gene, class, somatic_status) %>%
+  pivot_wider(names_from = somatic_status, values_from = n, values_fill = 0)
+
+status_cols <- setdiff(names(supp_base), c("gene", "class"))
+
+supp_long <- supp_base %>%
+  mutate(n_total = rowSums(across(all_of(status_cols))),
+         n_unknown = if ("Variant of unknown origin" %in% status_cols) `Variant of unknown origin` else 0L,
+         pct_unknown = if_else(n_total > 0, round(100 * n_unknown / n_total, 1), NA_real_)) %>%
+  select(gene, class, n_total, n_unknown, pct_unknown)
+
+# For each of the 145 informative genes, the feature (COSMIC/sperm/buccal
+# missense codon count) with the highest AUC lower 95% CI, and that CI --
+# i.e. whichever feature is responsible for that gene's membership in the
+# 145-gene set. Reproduced from Supplementary Table 2, same as Section 1.
+informative_auc <- st2 %>%
+  filter(gene %in% genes_145, Predictor %in% c("n_COSMIC_codon_count", "n_sperm_codon_count", "n_buccal_codon_count"),
+         !is.na(AUC_full_lower)) %>%
+  group_by(gene) %>%
+  slice_max(AUC_full_lower, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  transmute(gene, auc_lower = AUC_full_lower, qualifying_feature = Predictor)
+
+supp_table_all <- tibble(gene = genes_145) %>%
+  left_join(informative_auc, by = "gene") %>%
+  left_join(gene_universe %>% select(gene, utility_label = label), by = "gene") %>%
+  left_join(supp_long %>% filter(class == "ClinVar P/LP") %>% select(-class) %>%
+              rename_with(~ paste0(.x, "_path"), -gene),
+            by = "gene") %>%
+  left_join(supp_long %>% filter(class == "Biobank benign") %>% select(-class) %>%
+              rename_with(~ paste0(.x, "_benign"), -gene),
+            by = "gene") %>%
+  mutate(across(c(n_total_path, n_unknown_path, n_total_benign, n_unknown_benign), ~ replace_na(.x, 0L)),
+         low_n_path = n_total_path < 10, low_n_benign = n_total_benign < 10) %>%
+  arrange(desc(auc_lower))
+
+no_evidence_genes <- supp_table_all %>% filter(n_total_path == 0, n_total_benign == 0) %>% pull(gene)
+supp_table <- supp_table_all %>% filter(!gene %in% no_evidence_genes)
+
+cat("Genes for which somatic data are informative:", nrow(supp_table_all), "\n")
+cat("Excluded (no COSMIC evidence in either class):", length(no_evidence_genes), "-",
+    paste(no_evidence_genes, collapse = ", "), "\n")
+cat("Rows in supplementary table:", nrow(supp_table), "\n")
+cat("Genes with fewer than 10 ClinVar P/LP depositions:", sum(supp_table$low_n_path), "of", nrow(supp_table), "\n")
+write_csv(supp_table, OUT_SUPP_TABLE)
+supp_table %>% knitr::kable(caption = "The 145 genes for which somatic data are informative: COSMIC somatic-status breakdown for their exact ClinVar P/LP and biobank-benign variants, ordered by AUC lower confidence bound")
+```
+
+# Discussion
+
+```{r interp-numbers}
+get_pct <- function(tab, cls, status) {
+  v <- tab %>% filter(class == cls, somatic_status == status) %>% pull(pct)
+  if (length(v) == 0) 0 else v
+}
+pos_path_unknown   <- get_pct(overall_pos, "ClinVar P/LP", "Variant of unknown origin")
+pos_benign_unknown <- get_pct(overall_pos, "Biobank benign", "Variant of unknown origin")
+all_path_unknown   <- get_pct(overall, "ClinVar P/LP", "Variant of unknown origin")
+all_benign_unknown <- get_pct(overall, "Biobank benign", "Variant of unknown origin")
+inf145_path_unknown   <- get_pct(overall_145, "ClinVar P/LP", "Variant of unknown origin")
+inf145_benign_unknown <- get_pct(overall_145, "Biobank benign", "Variant of unknown origin")
+zero_overlap_pos <- setdiff(genes_positive, unique(overlap$gene))
+zero_overlap_145 <- setdiff(genes_145, unique(overlap$gene))
+```
+
+Across the `r length(genes_145)` genes for which somatic data are
+informative (Supplementary Table 2), **`r inf145_path_unknown`%** of COSMIC
+depositions of the exact ClinVar Pathogenic/Likely Pathogenic variants used
+as evidence in this project are "Variant of unknown origin". For the exact
+biobank-benign variants, the corresponding figure is
+**`r inf145_benign_unknown`%**. Restricting to the narrower `r length(genes_positive)`
+confident-positive genes (COSMIC missense codon count AUC lower 95% CI >
+0.70) gives very similar figures: `r pos_path_unknown`% (ClinVar P/LP) and
+`r pos_benign_unknown`% (biobank-benign). Both are well below the
+`r all_path_unknown`%/`r all_benign_unknown`% seen across all
+`r length(genes_eligible)` monoallelic benchmarking-eligible genes
+irrespective of somatic-utility label.
+
+This pooled figure is not evenly distributed across genes; Section 5.3 and
+the supplementary table (Section 6) give the per-gene breakdown. A gene's
+`n_total` is as informative as its `pct_unknown`, since a percentage
+computed from a small number of depositions can be dominated by a single
+observation.
+
+`r length(zero_overlap_145)` of the 145 informative genes (`r length(zero_overlap_pos)`
+of the 40 confident-positive genes) have no COSMIC deposition of either
+their exact ClinVar P/LP or exact biobank-benign variants:
+`r if (length(zero_overlap_145) > 0) paste(zero_overlap_145, collapse = ", ") else "none"`.
+Absence of a COSMIC deposition for a specific variant does not indicate
+absence of somatic recurrence at the underlying locus more broadly, only
+that the specific variant used as evidence has not itself been independently
+observed in a tumour to date.
+
+A "Variant of unknown origin" annotation represents an upper bound on
+potential germline contamination for that deposition, not confirmation of
+it: the great majority of such variants are very likely genuinely somatic.
+This analysis quantifies exposure to that possibility for the exact evidence
+used, rather than estimating a true contamination rate.
+
+This analysis evaluates variant-level COSMIC evidence, comparable to the
+`n_COSMIC` feature computed elsewhere in this project, which is distinct
+from the codon-aggregated `n_COSMIC_codon_count` feature used to define the
+somatic-utility labels themselves (aggregation at codon level is used there
+to increase statistical power by pooling independent substitutions at the
+same residue). The two should not be conflated when interpreting this
+analysis alongside the somatic-utility model.

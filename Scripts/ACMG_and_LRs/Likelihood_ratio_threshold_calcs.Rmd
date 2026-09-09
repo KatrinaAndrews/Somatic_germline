@@ -59,10 +59,15 @@ all_genes <- unique(c(clinvar_path$gene, biobank_benign$gene, DNMs_31k$gene))
 transmute_variants <- function(df, class_label) {
   df %>% transmute(
     gene,
-    n_COSMIC             = as.numeric(n_COSMIC),
-    n_sperm              = as.numeric(n_sperm),
-    n_sperm_codon_count  = as.numeric(n_sperm_codon_count),
-    n_COSMIC_codon_count = as.numeric(n_COSMIC_codon_count),
+    n_COSMIC                    = as.numeric(n_COSMIC),
+    n_sperm                     = as.numeric(n_sperm),
+    n_sperm_codon_count         = as.numeric(n_sperm_codon_count),
+    n_COSMIC_codon_count        = as.numeric(n_COSMIC_codon_count),
+    # genome/exome-wide COSMIC studies only (excludes targeted cancer gene
+    # panels) -- a sensitivity check on whether mixed genome+panel
+    # ascertainment (the default used for n_COSMIC_codon_count throughout
+    # the paper) biases the somatic-evidence likelihood ratios
+    n_COSMIC_genome_codon_count = as.numeric(n_COSMIC_genome_codon_count),
     hotcodon_cancer      = as.logical(hotcodon_cancer),
     class                = class_label
   )
@@ -147,6 +152,16 @@ rule_tbl <- tibble::tribble(
   "n_COSMIC_codon_count > 20", quote(n_COSMIC_codon_count > 20),
   "n_COSMIC_codon_count > 50", quote(n_COSMIC_codon_count > 50),
 
+  "n_COSMIC_genome_codon_count > 0",  quote(n_COSMIC_genome_codon_count > 0),
+  "n_COSMIC_genome_codon_count > 1",  quote(n_COSMIC_genome_codon_count > 1),
+  "n_COSMIC_genome_codon_count > 2",  quote(n_COSMIC_genome_codon_count > 2),
+  "n_COSMIC_genome_codon_count > 3",  quote(n_COSMIC_genome_codon_count > 3),
+  "n_COSMIC_genome_codon_count 1-4",  quote(n_COSMIC_genome_codon_count >= 1 & n_COSMIC_genome_codon_count <= 4),
+  "n_COSMIC_genome_codon_count > 5",  quote(n_COSMIC_genome_codon_count > 5),
+  "n_COSMIC_genome_codon_count > 10", quote(n_COSMIC_genome_codon_count > 10),
+  "n_COSMIC_genome_codon_count > 20", quote(n_COSMIC_genome_codon_count > 20),
+  "n_COSMIC_genome_codon_count > 50", quote(n_COSMIC_genome_codon_count > 50),
+
   "hotcodon_cancer", quote(hotcodon_cancer == TRUE)
 )
 ```
@@ -207,20 +222,23 @@ lr_results <- bind_rows(
   run_lr(DNMs_31k_unique_vs_biobank,  "DNMs_31k_unique_public",  "DNM_31k", "unique")
 ) %>%
   mutate(feature = case_when(
-    str_detect(rule, "n_COSMIC ")           ~ "n_COSMIC",
-    str_detect(rule, "n_sperm_codon_count") ~ "n_sperm_codon_count",
-    str_detect(rule, "n_sperm ")            ~ "n_sperm",
-    str_detect(rule, "n_COSMIC_codon_count")~ "n_COSMIC_codon_count",
-    str_detect(rule, "hotcodon_cancer")     ~ "hotcodon_cancer"
+    str_detect(rule, "n_COSMIC ")                  ~ "n_COSMIC",
+    str_detect(rule, "n_sperm_codon_count")        ~ "n_sperm_codon_count",
+    str_detect(rule, "n_sperm ")                   ~ "n_sperm",
+    str_detect(rule, "n_COSMIC_genome_codon_count")~ "n_COSMIC_genome_codon_count",
+    str_detect(rule, "n_COSMIC_codon_count")       ~ "n_COSMIC_codon_count",
+    str_detect(rule, "hotcodon_cancer")            ~ "hotcodon_cancer"
   )) %>%
   mutate(threshold = case_when(
-    str_detect(rule, "n_COSMIC > ")              ~ paste0(">", str_extract(rule, "(?<=n_COSMIC > )\\d+")),
-    str_detect(rule, "n_COSMIC 1-4")             ~ "1-4",
-    str_detect(rule, "n_sperm > ")               ~ paste0(">", str_extract(rule, "(?<=n_sperm > )\\d+")),
-    str_detect(rule, "n_sperm_codon_count > ")   ~ paste0(">", str_extract(rule, "(?<=n_sperm_codon_count > )\\d+")),
-    str_detect(rule, "n_COSMIC_codon_count > ")  ~ paste0(">", str_extract(rule, "(?<=n_COSMIC_codon_count > )\\d+")),
-    str_detect(rule, "n_COSMIC_codon_count 1-4") ~ "1-4",
-    str_detect(rule, "hotcodon_cancer")          ~ "TRUE"
+    str_detect(rule, "n_COSMIC > ")                     ~ paste0(">", str_extract(rule, "(?<=n_COSMIC > )\\d+")),
+    str_detect(rule, "n_COSMIC 1-4")                    ~ "1-4",
+    str_detect(rule, "n_sperm > ")                      ~ paste0(">", str_extract(rule, "(?<=n_sperm > )\\d+")),
+    str_detect(rule, "n_sperm_codon_count > ")          ~ paste0(">", str_extract(rule, "(?<=n_sperm_codon_count > )\\d+")),
+    str_detect(rule, "n_COSMIC_genome_codon_count > ")  ~ paste0(">", str_extract(rule, "(?<=n_COSMIC_genome_codon_count > )\\d+")),
+    str_detect(rule, "n_COSMIC_genome_codon_count 1-4") ~ "1-4",
+    str_detect(rule, "n_COSMIC_codon_count > ")         ~ paste0(">", str_extract(rule, "(?<=n_COSMIC_codon_count > )\\d+")),
+    str_detect(rule, "n_COSMIC_codon_count 1-4")        ~ "1-4",
+    str_detect(rule, "hotcodon_cancer")                 ~ "TRUE"
   ))
 ```
 

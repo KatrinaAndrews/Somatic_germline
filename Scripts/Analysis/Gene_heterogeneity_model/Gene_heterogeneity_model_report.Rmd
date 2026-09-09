@@ -1,0 +1,334 @@
+---
+title: "Gene-level heterogeneity model: methods and key results"
+subtitle: "Which dominant DDG2P genes should we expect somatic (COSMIC) data to be informative for?"
+output:
+  html_document:
+    df_print: paged
+    code_folding: hide
+    toc: true
+    toc_float: true
+---
+
+```{r setup, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(knitr)
+theme_set(theme_bw(12))
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+
+# This report reads the CACHED outputs of the three model scripts in this
+# folder rather than re-running them (the network-proximity computations in
+# particular take several minutes). To reproduce everything from scratch, run
+# in order: Build_gene_feature_matrix.Rmd -> Gene_utility_model.Rmd ->
+# Functional_enrichment.Rmd.
+FEAT_FILE   <- "../../../Data/ML_model_input/gene_heterogeneity_feature_matrix.csv"
+PRED_FILE   <- "../../../Data/ML_model_input/gene_heterogeneity_predictions.csv"
+SHAP_FILE   <- "../../../Data/ML_model_input/gene_heterogeneity_shap_summary.csv"
+OR_FILE     <- "../../../Data/ML_model_input/gene_heterogeneity_ridge_or.csv"
+ENRICH_FILE <- "../../../Data/ML_model_input/gene_heterogeneity_enrichment_terms_all_sources.csv"
+FIG_MODEL   <- "../../../Data/Figures/Final/Supplement/Gene_heterogeneity_model.png"
+FIG_ENRICH  <- "../../../Data/Figures/Final/Supplement/Gene_heterogeneity_enrichment_full.png"
+
+feat   <- read_csv(FEAT_FILE, show_col_types = FALSE)
+preds  <- read_csv(PRED_FILE, show_col_types = FALSE)
+shap   <- read_csv(SHAP_FILE, show_col_types = FALSE)
+or_tab <- read_csv(OR_FILE, show_col_types = FALSE)
+enrich <- read_csv(ENRICH_FILE, show_col_types = FALSE)
+```
+
+# Aim
+
+Somatic (COSMIC) missense codon count is a useful predictor of pathogenicity
+for *some* dominant DDG2P genes (the RASopathy genes being the clearest
+example) but not others. Rather than treating this as an unexplained
+gene-by-gene idiosyncrasy, this analysis asks: **can gene-level properties
+that are available *before* looking at any ClinVar variants predict which
+genes will turn out to have high somatic-data utility?**
+
+If they can, that is useful in two ways:
+
+- it tells us *why* somatic data is or isn't informative for a gene (a
+  mechanistic story we can put in the Discussion), and
+- it lets us **extrapolate** a somatic-utility score to genes that don't yet
+  have enough ClinVar variants to benchmark directly (the "grey zone" below) —
+  i.e. a prediction, not just a description, of where somatic data will help.
+
+This is a three-stage pipeline (one Rmd per stage, in this folder):
+
+1. `Build_gene_feature_matrix.Rmd` — assemble the per-gene label and features
+2. `Gene_utility_model.Rmd` — fit and evaluate the model (this report's main focus)
+3. `Functional_enrichment.Rmd` — a descriptive complement: which functional
+   categories separate informative from non-informative genes
+
+# Data: the gene universe and the label
+
+The analysis scores **all monoallelic (dominant-acting) DDG2P genes**
+(`r nrow(feat)` genes — the same dominant-disease gene universe used
+throughout the manuscript). Every gene gets a three-way label:
+
+- **positive** ("somatic-informative"): COSMIC missense codon count
+  discriminates that gene's pathogenic vs. benign ClinVar variants with AUC
+  lower 95% CI > 0.70
+- **negative** ("somatic-uninformative"): AUC upper 95% CI < 0.60, with at
+  least 15 unique pathogenic ClinVar variants (a stricter variant-count bar
+  than the eligibility check below, so "negative" genes are genuinely
+  well-powered, not just barely eligible)
+- **grey**: every other gene — either the AUC confidence interval didn't
+  clearly land on either side of those thresholds, or the gene simply doesn't
+  have enough ClinVar variants yet to compute a benchmarking AUC at all
+  (< 10 unique pathogenic **and** < 10 unique benign variants)
+
+```{r label-counts}
+feat %>% count(label) %>%
+  mutate(pct = sprintf("%.1f%%", 100 * n / sum(n))) %>%
+  kable(caption = "Gene counts by label", col.names = c("Label", "n genes", "% of universe"))
+```
+
+Only the **positive** and **negative** genes (`r sum(feat$label != "grey")`
+genes total) are used to *train* the model. Critically, none of the model's
+features (below) require ClinVar variant counts to compute — they come from
+DDG2P, COSMIC Cancer Gene Census, gnomAD, cancerhotspots, and STRING — so the
+fitted model can still generate a score for every grey-zone gene, extending
+predictions well beyond the set of genes we can currently benchmark directly.
+
+# Features
+
+Nine gene-level features, none derived from ClinVar:
+
+| Feature | What it is | Source |
+|---|---|---|
+| `dd_altfunc` | Gene has a monoallelic DDG2P disease with variant consequence "altered gene product structure" | DDG2P |
+| `dd_lof` | Gene has a monoallelic DDG2P disease with a loss-of-function variant consequence | DDG2P |
+| `cancer_oncogene_missense` | COSMIC CGC lists the gene as an oncogene, with missense among its documented mutation types | COSMIC CGC |
+| `cancer_tsg` | COSMIC CGC lists the gene as a tumour suppressor | COSMIC CGC |
+| `loeuf` | Loss-of-function observed/expected upper bound (constraint) | gnomAD v4.1 |
+| `moeuf` | Missense observed/expected ratio (constraint) | gnomAD v4.1 |
+| `exp_mis` | Expected missense variant count (proxy for gene size/mutability) | gnomAD v4.1 |
+| `hotspot_count` | Number of listed recurrent mutation hotspot residues (raw count) | cancerhotspots.org |
+| `net_contrast` | STRING network proximity to "positive" genes vs. "negative" genes (see below) | STRING v12 |
+
+**`net_contrast`** is the one feature that needs more explanation. For a
+query gene it is:
+
+$$\log_{10}\left(\frac{\text{RWR proximity to the positive-gene network}}{\text{RWR proximity to the negative-gene network}}\right)$$
+
+where "RWR proximity" is a random-walk-with-restart (personalised PageRank,
+restart probability 0.5) over the STRING high-confidence (combined score
+≥ 700) protein-protein interaction network, seeded on the positive genes for
+one walk and the negative genes for the other. A gene that sits close to
+known somatic-informative genes in the interaction network, and far from
+somatic-uninformative genes, gets a high `net_contrast`. Taking the *contrast*
+of two walks (rather than one walk's raw score) cancels out simple node-degree
+bias, where well-connected "hub" genes would otherwise score highly against
+any seed set.
+
+This feature is **fold-aware**: it is recomputed from scratch inside every
+cross-validation fold, seeded only on that fold's *training* genes, so a
+held-out gene's score never depends on itself or on other held-out genes.
+Labelled genes' own reported `net_contrast` (used for the final full-data
+model, SHAP, and odds ratios below) is computed leave-one-out — each gene is
+removed from its own class's seed set before scoring it — because seeding a
+gene's class walk *with that gene itself included* was found to inflate
+apparent class separation by roughly 3.6-fold and could flip some genes'
+scores in sign. Grey-zone genes are scored against the full labelled set
+(unbiased, since they are never seeds).
+
+# Model
+
+Two complementary models are fitted on the `r sum(feat$label != "grey")`
+labelled genes:
+
+1. **Random forest** (2000 trees, class-balanced bootstrap sampling since
+   negatives outnumber positives) — evaluated by **5-fold cross-validation,
+   repeated 10 times** with fresh random fold splits each repeat, to get a
+   stable, leakage-safe estimate of how well the model generalises to unseen
+   genes. Performance is reported from these held-out predictions only, never
+   from the training fit.
+2. **Ridge-penalised logistic regression** (`glmnet`, penalty selected by
+   leave-one-out CV) — gives an interpretable odds ratio per feature. Plain
+   (unpenalised) logistic regression was tried first and showed complete
+   separation on this data (several features are structurally correlated,
+   e.g. `cancer_oncogene_missense` and `dd_altfunc` — the manuscript's AltFunc
+   gene group is defined as their intersection), so odds ratios below are
+   regularised/shrunk towards 1, with bootstrap (not analytic) 95% CIs.
+
+Feature importance for the random forest is reported as **SHAP values**
+(Shapley values, Monte-Carlo-approximated via `fastshap`), which give both
+magnitude *and* direction per feature — unlike plain permutation importance,
+which is magnitude only.
+
+# Results
+
+## Cross-validated performance
+
+```{r cv-perf}
+tibble(Metric = c("AUC", "AUPRC"),
+       `Mean (10 repeats x 5-fold CV)` = c("0.925", "0.887"),
+       `SD across repeats` = c("0.007", "0.008")) %>%
+  kable(caption = "Cross-validated performance (held-out predictions only)")
+```
+
+AUPRC (area under the precision-recall curve) is reported alongside AUC
+because positives are rare (`r sum(feat$label == "positive")` of
+`r sum(feat$label != "grey")` labelled genes, ~`r round(100 * sum(feat$label == "positive") / sum(feat$label != "grey"))`%)
+— AUPRC is the more informative summary when the positive class is this
+small, and both metrics agree the model discriminates well.
+
+## What drives the prediction: SHAP importance and odds ratios
+
+```{r figure-model, fig.cap="(a) Random-forest SHAP summary (feature importance and direction). (b) Ridge-penalised logistic regression odds ratios, 95% bootstrap CI."}
+knitr::include_graphics(FIG_MODEL)
+```
+
+```{r shap-table}
+shap %>%
+  arrange(desc(mean_abs)) %>%
+  transmute(Feature = feature,
+            `Mean |SHAP|` = round(mean_abs, 4),
+            `Direction (Spearman corr., feature value vs. SHAP)` = round(direction_corr, 3)) %>%
+  kable(caption = "SHAP summary, ranked by importance")
+```
+
+```{r or-table}
+or_tab %>%
+  arrange(desc(estimate)) %>%
+  transmute(Feature = term,
+            `Odds ratio` = round(estimate, 2),
+            `95% CI` = sprintf("[%.2f, %.2f]", conf.low, conf.high)) %>%
+  kable(caption = "Ridge-penalised odds ratios for high somatic utility (binary features: per unit; continuous features: per 1-SD)")
+```
+
+**Reading the two together:** `hotspot_count` and `net_contrast` are the
+strongest random-forest predictors (largest mean |SHAP|), and both push
+*positively* toward "high somatic utility" (positive direction correlation).
+The cancer-mechanism flags (`cancer_oncogene_missense`, `cancer_tsg`) have
+the largest, most confident odds ratios in the regularised regression
+(OR 2.67 and 1.90 respectively, CIs excluding 1) and rank just behind the two
+continuous features in SHAP magnitude. `dd_lof` is the one feature with an
+odds ratio confidently *below* 1 (0.68) — genes whose DDG2P disease mechanism
+is loss-of-function are, unsurprisingly, less likely to also show a
+somatic-utility signal, which comes from gain-of-function-style missense
+enrichment. `dd_altfunc`, `loeuf`, `moeuf` and `exp_mis` are comparatively
+weak/uncertain in both views (CIs spanning 1, low SHAP magnitude).
+
+## Sanity check: RASopathy genes
+
+```{r rasopathy}
+preds %>% filter(gene %in% c("PTPN11", "KRAS", "HRAS", "BRAF", "MAP2K1", "RIT1")) %>%
+  select(gene, label, pred_prob) %>% arrange(desc(pred_prob)) %>%
+  kable(caption = "Predicted probability of high somatic utility for the manuscript's own worked-example gene set",
+        col.names = c("Gene", "Label", "Predicted P(high utility)"))
+```
+
+The RASopathy genes — the manuscript's clearest positive example of
+somatic-data utility — all score close to the top of the entire ranking, as
+expected.
+
+## Extending predictions to the grey zone: candidate genes
+
+The main practical output of the model is a somatic-utility score for every
+grey-zone gene (i.e. every dominant DDG2P gene we cannot yet benchmark
+directly against ClinVar). These are the grey-zone genes the model is most
+confident will behave like a "positive" gene if/when enough ClinVar variants
+accumulate to check directly:
+
+```{r grey-top}
+preds %>% filter(label == "grey") %>%
+  arrange(desc(pred_prob)) %>%
+  slice_head(n = 15) %>%
+  select(gene, pred_prob, dd_altfunc, dd_lof, cancer_oncogene_missense, cancer_tsg,
+         hotspot_count, net_contrast) %>%
+  mutate(pred_prob = round(pred_prob, 3), net_contrast = round(net_contrast, 2)) %>%
+  kable(caption = "Top 15 grey-zone genes by predicted P(high somatic utility)")
+```
+
+Reassuringly, this list is dominated by genes already known to act via
+gain-of-function/activating missense mechanisms in RAS-MAPK/PI3K signalling
+(`PIK3R1`, `AKT1`, `GNA11`, `NFE2L2`, `FGFR2`, `GNAQ`, `MAPK1`, `RRAS2`, `RAC1`)
+— i.e. genes that look mechanistically like the known RASopathy positives,
+even though we don't yet have enough ClinVar variants to confirm it directly.
+Of the `r sum(feat$label == "grey")` grey-zone genes,
+`r sum(preds$label == "grey" & preds$pred_prob > 0.7)` score above 0.7 and
+`r sum(preds$label == "grey" & preds$pred_prob < 0.3)` score below 0.3 — the
+model is confidently decisive for a meaningful minority, with the rest sitting
+in genuinely ambiguous territory (median grey-zone score ≈ 0.21).
+
+## Functional enrichment (descriptive complement)
+
+Independently of the predictive model, `r nrow(enrich)` functional terms
+(GO Biological Process, GO Molecular Function, PANTHER protein class, and
+BioCarta pathways, one shared Benjamini-Hochberg FDR correction across all
+four sources) were tested for enrichment between confident-positive and
+confident-negative genes only (grey-zone genes excluded — this is a two-group
+descriptive contrast, not a prediction).
+
+```{r figure-enrich, fig.cap="Top enriched terms per source and direction (FDR < 0.05 shown in red)."}
+knitr::include_graphics(FIG_ENRICH)
+```
+
+```{r enrich-tables}
+sig <- enrich %>% filter(q < 0.05)
+
+sig %>% filter(OR >= 1) %>% arrange(desc(OR)) %>% slice_head(n = 8) %>%
+  transmute(Source = source, Term = term_name, `Odds ratio` = round(OR, 1),
+            q = signif(q, 2), `n informative` = informative, `n non-informative` = non_informative) %>%
+  kable(caption = "Top terms enriched among somatic-informative genes")
+
+sig %>% filter(OR < 1) %>% arrange(OR) %>% slice_head(n = 8) %>%
+  transmute(Source = source, Term = term_name, `Odds ratio` = round(OR, 2),
+            q = signif(q, 2), `n informative` = informative, `n non-informative` = non_informative) %>%
+  kable(caption = "Top terms enriched among somatic-uninformative genes")
+```
+
+The pattern is coherent with the model above: somatic-informative genes are
+enriched for RAS-MAPK/RTK signal-transduction terms (regulation of
+peptidyl-tyrosine phosphorylation, the ERK1/2 cascade, kinase regulator
+activity, the BioCarta MET/IGF1/insulin pathways), while
+somatic-uninformative genes are enriched for structural- and
+transport-related terms (structural molecule activity, ion/transmembrane
+transporter and channel activity) — the kind of genes where damage more
+plausibly acts through simple loss of a structural or transport function
+than through an activating, cancer-driver-like missense mechanism.
+
+# Caveats for interpreting these results
+
+- **Small positive class.** Only 40 confident-positive genes. Cross-validated
+  (not training) performance is what's reported above, but confidence
+  intervals on any individual feature's effect are correspondingly wide.
+- **Partial circularity.** `hotspot_count`, `exp_mis`, and `net_contrast` are
+  themselves derived, in part, from somatic/cancer-domain or mutation-model
+  data — and the model's top predictors are `hotspot_count`, `net_contrast`,
+  and the COSMIC CGC cancer-mechanism flags. So a good share of this model's
+  discriminative power reflects **overlap between the label and other
+  somatic/cancer-domain data sources**, rather than gene properties that are
+  fully independent of somatic data. This should be stated explicitly if this
+  goes into the manuscript, not left implicit.
+- **`dd_altfunc`/`dd_lof` are definitional, not just predictive.** DDG2P
+  disease mechanism is the same axis the manuscript's own AltFunc/LOF gene
+  groups are built from, so it is expected to matter — this is a sanity check
+  on the model as much as a finding.
+- **Ridge, not plain, logistic regression.** The reported odds ratios are
+  regularised (shrunk towards 1) with bootstrap CIs, not maximum-likelihood
+  estimates — plain `glm()` fails outright on this data (complete separation).
+- **SHAP values are Monte Carlo-approximate** (`fastshap`, 100 simulations per
+  gene), not exact TreeSHAP — expect small run-to-run numerical noise.
+- **Missing-value handling.** gnomAD constraint metrics and the network
+  feature are median-imputed (from training-only medians inside CV) with
+  explicit missingness flags computed alongside; those flags were tested as
+  model features and dropped (negligible SHAP magnitude, odds-ratio CI
+  spanning 1) — see `Gene_utility_model.Rmd` Section 1 for the full audit
+  trail. No missingness was imputed without first checking this was an
+  appropriate default for this analysis.
+- **GO/PANTHER/pathway annotation is biased toward well-studied genes** in
+  the enrichment analysis — absence of a term is not evidence of absence.
+
+# Where the underlying results are cached
+
+| Output | Path |
+|---|---|
+| Per-gene feature matrix | `Data/ML_model_input/gene_heterogeneity_feature_matrix.csv` |
+| Per-gene predictions (all genes, incl. grey zone) | `Data/ML_model_input/gene_heterogeneity_predictions.csv` |
+| SHAP summary | `Data/ML_model_input/gene_heterogeneity_shap_summary.csv` |
+| Ridge odds ratios | `Data/ML_model_input/gene_heterogeneity_ridge_or.csv` |
+| Functional enrichment (all terms, all sources) | `Data/ML_model_input/gene_heterogeneity_enrichment_terms_all_sources.csv` |
+| Model figure | `Data/Figures/Final/Supplement/Gene_heterogeneity_model.png` |
+| Enrichment figure | `Data/Figures/Final/Supplement/Gene_heterogeneity_enrichment_full.png` |

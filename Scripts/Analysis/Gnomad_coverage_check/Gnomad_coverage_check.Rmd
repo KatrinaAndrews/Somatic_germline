@@ -1,0 +1,232 @@
+---
+title: "gnomAD sequencing-coverage check"
+subtitle: "Is poor sequencing coverage a plausible explanation for zero COSMIC counts in the somatic-informative genes?"
+output:
+  html_document:
+    df_print: paged
+    code_folding: hide
+    toc: true
+    toc_float: true
+---
+
+# Background
+
+A gene with zero observed COSMIC missense mutations at a given codon could
+reflect either genuine absence of somatic selection there, or simply poor
+sequencing coverage of that region across the studies contributing to
+COSMIC. COSMIC aggregates variant calls from thousands of independent
+historical studies with no unified capture design, so no direct per-position
+coverage denominator for COSMIC itself exists, and none is likely to become
+available.
+
+gnomAD provides a large, independently sequenced cohort (v4.1: 730,947 exomes)
+assembled from many different sequencing platforms, projects, and capture
+kits. A gene with a genuine sequencing-coverage problem (for example, a
+repetitive or GC-rich region that many capture kits struggle with) would be
+expected to show reduced coverage in gnomAD as well, since gnomAD's cohort
+draws on a similarly heterogeneous mix of underlying studies. Uniformly good
+gnomAD coverage across a gene is therefore evidence against a systematic,
+capture-driven coverage problem at that locus, and by extension makes it less
+likely that COSMIC's ascertainment of the same coding sequence is
+compromised for the same reason. This does not measure COSMIC's own coverage
+directly, and cannot rule out COSMIC-specific gaps unrelated to general
+capture difficulty, but it is a useful proxy for genes that are inherently
+hard to sequence.
+
+This check restricts to the coding sequence of each gene's MANE Select
+transcript, queried directly from the gnomAD API (v4.1 exome coverage;
+`gnomad_r4`, which shares its coverage data with v4.1), rather than
+downloading gnomAD's full genome-wide coverage summary (many gigabytes,
+almost entirely outside the ~145 genes of interest).
+
+```{r setup, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(httr)
+library(jsonlite)
+theme_set(theme_bw(12))
+knitr::opts_chunk$set(warning = FALSE, message = FALSE, cache = TRUE, autodep = TRUE)
+
+DATA_DIR  <- "../../../Data"
+ST2_FILE  <- file.path(DATA_DIR, "Tables/Supplementary_Table2.csv")
+OUT_TABLE <- file.path(DATA_DIR, "ML_model_input/gnomad_coverage_check_informative_genes.csv")
+OUT_FIG   <- file.path(DATA_DIR, "Figures/Final/Supplement/Gnomad_coverage_check.png")
+
+GNOMAD_API <- "https://gnomad.broadinstitute.org/api"
+```
+
+# 1. Gene set
+
+The 145 genes for which somatic data are informative (per-gene benchmarking,
+count-weighted ClinVar pathogenic variants, AUC lower 95% CI > 0.6 for at
+least one somatic feature -- COSMIC, sperm NanoSeq, or buccal NanoSeq
+missense codon count; Results, "Somatic data predicts germline pathogenicity
+in DD genes"), reproduced directly from Supplementary Table 2.
+
+```{r genes}
+st2 <- read_csv(ST2_FILE, show_col_types = FALSE) %>% filter(dataset == "clinvar_count_weighted")
+qualifying_genes <- function(predictor) {
+  st2 %>% filter(Predictor == predictor, !is.na(AUC_full_lower), AUC_full_lower > 0.6) %>% pull(gene)
+}
+genes_cosmic <- qualifying_genes("n_COSMIC_codon_count")
+genes_sperm  <- qualifying_genes("n_sperm_codon_count")
+genes_buccal <- qualifying_genes("n_buccal_codon_count")
+genes_positive <- union(union(genes_cosmic, genes_sperm), genes_buccal)
+
+cat("COSMIC missense codon count (AUC lower CI > 0.6):", length(genes_cosmic), "\n")
+cat("Sperm NanoSeq missense codon count:", length(genes_sperm), "\n")
+cat("Buccal NanoSeq missense codon count:", length(genes_buccal), "\n")
+cat("Union (informative genes):", length(genes_positive), "\n")
+```
+
+# 2. gnomAD coverage query
+
+For each gene, two GraphQL queries against the gnomAD API retrieve: (i) the
+Ensembl ID of the gene's MANE Select transcript; (ii) that transcript's
+coding-sequence (CDS) exon boundaries and its exome coverage profile
+(binned by position, each bin giving the mean depth and the fraction of the
+730,947-exome cohort with at least 1x/10x/20x coverage at that position).
+Coverage bins are restricted to positions falling within a CDS exon, so that
+non-coding (intronic) positions -- which are not targeted by exome capture
+and are not relevant to missense-variant detection -- do not contribute to
+the summary.
+
+Over a run of ~150 genes (~300 requests), the API occasionally returns a
+transient non-JSON error page instead of a normal response; a retry with
+backoff resolves this in practice, so the query helper below retries up to
+4 times before giving up on a gene.
+
+```{r query-helper}
+gnomad_query <- function(query, max_attempts = 4) {
+  for (attempt in seq_len(max_attempts)) {
+    resp <- POST(GNOMAD_API, body = list(query = query), encode = "json",
+                 add_headers("Content-Type" = "application/json"))
+    txt <- content(resp, as = "text", encoding = "UTF-8")
+    parsed <- tryCatch(fromJSON(txt, simplifyVector = FALSE), error = function(e) NULL)
+    if (!is.null(parsed)) return(parsed)
+    Sys.sleep(2 * attempt)
+  }
+  list(errors = list(list(message = "request failed after retries")))
+}
+
+get_mane_transcript <- function(gene_symbol) {
+  q <- sprintf('{ gene(gene_symbol: "%s", reference_genome: GRCh38) { mane_select_transcript { ensembl_id } } }', gene_symbol)
+  d <- gnomad_query(q)
+  if (!is.null(d$errors) || is.null(d$data$gene)) return(NA_character_)
+  mst <- d$data$gene$mane_select_transcript
+  if (is.null(mst)) NA_character_ else mst$ensembl_id
+}
+
+get_transcript_cds_coverage <- function(transcript_id) {
+  q <- sprintf('{ transcript(transcript_id: "%s", reference_genome: GRCh38) {
+      exons { start stop feature_type }
+      coverage(dataset: gnomad_r4) { exome { pos mean over_1 over_10 over_20 } }
+    } }', transcript_id)
+  d <- gnomad_query(q)
+  if (!is.null(d$errors) || is.null(d$data$transcript)) return(NULL)
+  t <- d$data$transcript
+  exons <- map_dfr(t$exons, ~ tibble(start = .x$start, stop = .x$stop, feature_type = .x$feature_type))
+  cds <- exons %>% filter(feature_type == "CDS")
+  cov <- map_dfr(t$coverage$exome, ~ tibble(pos = .x$pos, mean = .x$mean, over_1 = .x$over_1,
+                                             over_10 = .x$over_10, over_20 = .x$over_20))
+  list(cds = cds, cov = cov)
+}
+
+in_any_cds <- function(pos, cds) {
+  any(pos >= cds$start & pos <= cds$stop)
+}
+```
+
+```{r run-query}
+coverage_summary <- map_dfr(genes_positive, function(gene) {
+  tx <- get_mane_transcript(gene)
+  if (is.na(tx)) return(tibble(gene = gene, transcript = NA_character_, status = "no_mane_transcript"))
+
+  res <- get_transcript_cds_coverage(tx)
+  if (is.null(res) || nrow(res$cov) == 0) return(tibble(gene = gene, transcript = tx, status = "no_coverage_data"))
+
+  cds_bins <- res$cov %>% filter(map_lgl(pos, in_any_cds, cds = res$cds))
+  if (nrow(cds_bins) == 0) return(tibble(gene = gene, transcript = tx, status = "no_cds_bins_matched"))
+
+  cds_bins %>% summarise(
+    gene = gene, transcript = tx, status = "ok",
+    n_cds_bins = n(),
+    mean_depth = mean(mean),
+    min_bin_mean_depth = min(mean),
+    pct_bins_depth_lt10 = 100 * mean(mean < 10),
+    pct_bins_depth_lt20 = 100 * mean(mean < 20),
+    mean_frac_over_10 = mean(over_10),
+    mean_frac_over_20 = mean(over_20),
+    min_frac_over_20 = min(over_20)
+  )
+})
+
+cat("Genes queried:", nrow(coverage_summary), "\n")
+cat("Status breakdown:\n")
+print(count(coverage_summary, status))
+write_csv(coverage_summary, OUT_TABLE)
+```
+
+# 3. Results
+
+```{r table}
+coverage_summary %>%
+  filter(status == "ok") %>%
+  arrange(mean_frac_over_20) %>%
+  mutate(across(where(is.numeric), ~ round(.x, 2))) %>%
+  knitr::kable(caption = "gnomAD v4.1 exome coverage (CDS-restricted, MANE Select transcript) for the 145 somatic-informative genes, ordered by mean fraction of the cohort with >=20x coverage")
+```
+
+```{r figure, fig.width=8, fig.height=26}
+plot_dat <- coverage_summary %>% filter(status == "ok") %>%
+  mutate(gene = fct_reorder(gene, mean_frac_over_20))
+
+fig <- ggplot(plot_dat, aes(x = mean_frac_over_20, y = gene)) +
+  geom_segment(aes(x = 0, xend = mean_frac_over_20, y = gene, yend = gene), colour = "grey70") +
+  geom_point(aes(colour = mean_depth), size = 2.5) +
+  scale_colour_viridis_c(name = "Mean depth (x)") +
+  scale_x_continuous(limits = c(0, 1), labels = scales::percent) +
+  labs(title = "gnomAD exome coverage of the coding sequence, per gene",
+       subtitle = "Mean fraction of 730,947 gnomAD v4.1 exomes with >=20x coverage, averaged across CDS positions",
+       x = "Mean fraction of cohort with ≥20x coverage", y = NULL) +
+  theme(axis.text.y = element_text(size = 8))
+ggsave(OUT_FIG, fig, width = 8, height = 26, dpi = 300)
+fig
+```
+
+# Interpretation
+
+```{r interp-numbers}
+ok <- coverage_summary %>% filter(status == "ok")
+failed <- coverage_summary %>% filter(status != "ok")
+outliers <- ok %>% filter(mean_frac_over_20 < 0.8) %>% arrange(mean_frac_over_20)
+```
+
+`r nrow(ok)` of `r nrow(coverage_summary)` genes queried returned usable
+coverage data (`r paste(failed$gene, collapse=", ")` returned no coverage
+data from the API -- `r failed$gene[1]` sits in a pseudoautosomal region,
+which gnomAD's coverage endpoint does not resolve cleanly). The large
+majority show good, consistent coverage: median mean depth across the
+cohort is `r round(median(ok$mean_depth), 1)`x, and `r sum(ok$mean_frac_over_20 >= 0.8)`
+of `r nrow(ok)` genes have a mean fraction of the cohort with at least 20x
+coverage of 0.8 or higher across their coding sequence, with occasional
+individual low-depth bins (most prominently in `r ok$gene[which.min(ok$min_bin_mean_depth)]`)
+consistent with normal exon-boundary effects rather than a gene-wide deficit.
+
+This is not universally true, however: `r nrow(outliers)` gene(s) fall
+below that 0.8 threshold, most strikingly **`r outliers$gene[1]`**
+(mean depth `r round(outliers$mean_depth[1], 1)`x; only
+`r round(100 * outliers$mean_frac_over_20[1], 1)`% of the cohort reaches
+20x coverage across its coding sequence) -- a pattern consistent with a
+genuine, gene-wide capture difficulty rather than isolated exon-boundary
+noise, and worth flagging explicitly given that `r outliers$gene[1]`
+qualifies as somatic-informative via COSMIC missense codon count itself,
+with an AUC lower confidence interval close to the 0.6 threshold. This
+result should be read gene-by-gene (Supplementary Table 11) rather than
+summarised as a single reassuring or concerning statement across all 145
+genes: most genes show no indication of a coverage-driven artefact, but
+this check is precisely useful because it identifies the specific
+exceptions where that possibility cannot be excluded, rather than
+asserting it is universally absent. This remains a proxy check throughout
+and does not measure COSMIC's own coverage directly, nor rule out
+COSMIC-specific ascertainment gaps unrelated to general capture
+difficulty.

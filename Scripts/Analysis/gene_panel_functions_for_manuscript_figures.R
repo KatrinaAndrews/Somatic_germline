@@ -25,7 +25,7 @@ missense_colors <- c("missense" = "#882255", "non_missense" = "#6699CC")
 # Build a single, consistent legend (always shows both missense / non-missense)
 missense_legend_grob <- function(
   title = "",
-  labels = c("Missense", "Other"),
+  labels = c("Missense", "Non-missense"),
   position = "bottom"
 ) {
   if (!requireNamespace("cowplot", quietly = TRUE)) {
@@ -236,7 +236,7 @@ combine_gene_panel_plots_shared_labels <- function(
   show_legend = TRUE,
   legend_height = 0.10,
   legend_title = "",
-  legend_labels = c("Missense", "Other"),
+  legend_labels = c("Missense", "Non-missense"),
   labels = c(
     "n Clinvar P/LP",
     "n DNM",

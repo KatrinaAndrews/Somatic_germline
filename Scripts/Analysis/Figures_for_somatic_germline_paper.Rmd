@@ -264,6 +264,8 @@ simple_plot_AUC <- function(AUCs, data_name, predictor_cols, my_palette, xlims) 
   ggplot(df, aes(y = factor(Predictor, levels = rev(predictor_cols)), x = AUC_full, colour = colour)) +
     geom_point(size = 2) +
     geom_errorbar(aes(xmin = AUC_full_lower, xmax = AUC_full_upper), width = 1, orientation = "y") +
+    geom_text(aes(label = sprintf("%.2f", AUC_full)),
+              hjust = 1, nudge_x = -0.02, size = 2.8, colour = "black", na.rm = TRUE) +
     xlim(xlims) +
     labs(colour = "Predictor feature", x = "AUC", y = "") +
     scale_colour_manual(values = my_palette)
@@ -398,11 +400,19 @@ make_gene_panel <- function(genes, dataset_name) {
               aes(x = Predictor_simple, y = gene, fill = somatic_ci_cat), colour = "grey20") +
     geom_text(data = gene_df_somatic,
               aes(x = Predictor_simple, y = gene, label = auc_label), size = 3) +
-    scale_fill_manual(name = "Somatic AUC confidence group", values = somatic_ci_cols) +
+    scale_fill_manual(name = "Somatic AUC confidence group", values = somatic_ci_cols,
+      breaks = c("Somatic data helpful, AUC lower CI > 0.8","Somatic data helpful, AUC lower CI > 0.7",
+                 "Somatic data helpful, AUC lower CI > 0.6","Underpowered/inconclusive",
+                 "Somatic data not helpful, AUC upper CI < 0.4","Not in panel","missing"),
+      labels = c("Somatic data helpful AUC lower CI > 0.8","Somatic data helpful AUC lower CI > 0.7",
+                 "Somatic data helpful AUC lower CI > 0.6","Underpowered/inconclusive",
+                 "Somatic data not helpful, AUC upper CI < 0.4","Not in panel","Missing")) +
     ggnewscale::new_scale_fill() +
     geom_tile(data = gene_df_uplift,
               aes(x = Predictor_simple, y = gene, fill = uplift_cat), colour = "grey20") +
-    scale_fill_manual(name = "AUC uplift from adding somatic data", values = uplift_cols) +
+    scale_fill_manual(name = "AUC uplift from adding somatic data", values = uplift_cols,
+      breaks = c("<0","0–0.01","0.01–0.02","0.02–0.03","0.03–0.05",">0.05","missing"),
+      labels = c("<0","0–0.01","0.01–0.02","0.02–0.03","0.03–0.05",">0.05","Missing")) +
     geom_text(data = gene_df_uplift %>% dplyr::filter(p_stars != ""),
               aes(x = Predictor_simple, y = gene, label = p_stars), size = 3) +
     theme_bw(base_size = 12) +
@@ -800,8 +810,8 @@ p_heat <- ggplot() +
   ggnewscale::new_scale_fill() +
   geom_tile(data = df_uplift, aes(x = Predictor_simple, y = gene_group, fill = uplift_cat), colour = "grey20") +
   scale_fill_manual(name = "AUC uplift from adding somatic data", values = uplift_cols,
-    breaks = c(">0.05","0–0.01","0.01–0.02","<0","missing"),
-    labels = c(">0.05","0–0.01","0.01–0.02","<0","Missing")) +
+    breaks = c("<0","0–0.01","0.01–0.02","0.02–0.03","0.03–0.05",">0.05","missing"),
+    labels = c("<0","0–0.01","0.01–0.02","0.02–0.03","0.03–0.05",">0.05","Missing")) +
   geom_text(data = df_uplift %>% filter(p_stars != ""),
             aes(x = Predictor_simple, y = gene_group, label = p_stars), size = 3, colour = "black") +
   theme_bw(base_size = 12) +
@@ -1122,7 +1132,7 @@ ggsave("../../Data/Figures/Final/Supplement/Other_DD_somatic_genes_clinvar_long_
 
 ---
 
-## Supplementary Figure S3: COSMIC codon count LRs by data type
+## Supplementary Figure S5: COSMIC codon count LRs by data type
 
 Positive LRs for COSMIC missense codon count thresholds >0 through >10, and negative LR
 for the rule "COSMIC missense codon count = 0", in RASopathy genes. Data types shown are
@@ -1130,60 +1140,81 @@ the three publicly available datasets (ClinVar unique, ClinVar count-weighted, D
 count-weighted 31k cohort). DNM unique LRs are not pre-computed in the public LR table
 and are therefore not shown.
 
-```{r, fig.width=4, fig.height=8}
-LR_supp3 <- LR_edit %>%
-  filter(
-    feature    == "n_COSMIC_codon_count",
-    gene_group == "RASopathy genes",
-    !threshold %in% c("1-4", ">20", ">50")
-  ) %>%
-  mutate(data_set = case_when(
-    data_set == "clinvar_unique_public"  ~ "ClinVar unique",
-    data_set == "clinvar_long_public"    ~ "ClinVar count-weighted",
-    data_set == "DNMs_31k_long_public"   ~ "DNM count-weighted",
-    data_set == "DNMs_31k_unique_public" ~ "DNM unique",
-    TRUE ~ data_set
-  )) %>%
-  mutate(data_set = factor(data_set,
-                           levels = c("DNM count-weighted", "DNM unique",
-                                      "ClinVar unique", "ClinVar count-weighted")))
+Two panels: (a) `n_COSMIC_codon_count`, the combined genome+targeted-panel
+COSMIC missense codon count -- the **default** feature used for COSMIC throughout the
+rest of the paper; (b) `n_COSMIC_genome_codon_count`, restricted to genome/exome-wide
+COSMIC studies only (excluding targeted cancer gene panels, which have very different
+per-gene ascertainment), as a sensitivity check on whether the mixed ascertainment in (a)
+biases these likelihood ratios.
 
-p_supp3_pos <- ggplot(LR_supp3, aes(y = data_set, x = LR_pos)) +
-  geom_errorbarh(aes(xmin = LR_pos_low95, xmax = LR_pos_high95),
-                 height = 0.2, alpha = 0.7) +
-  geom_vline(data = acmg_lr_pos, aes(xintercept = lr),
-             linetype = "dotted", colour = "grey40", linewidth = 0.5, inherit.aes = FALSE) +
-  geom_text(data = acmg_lr_pos, aes(x = lr, y = Inf, label = level),
-            angle = 90, colour = "grey50", size = 3, vjust = 1, hjust = 1.1, inherit.aes = FALSE) +
-  geom_point(size = 2) +
-  scale_x_log10() +
-  facet_wrap(~ factor(threshold, levels = c(">0", ">1", ">2", ">3", ">5", ">10")), ncol = 1) +
-  labs(x = "Positive likelihood ratio", y = "") +
-  theme_bw() +
-  coord_cartesian(clip = "off") +
-  theme(plot.margin = margin(5.5, 20, 5.5, 5.5))
+```{r, fig.width=8, fig.height=8}
+make_lr_panel_data <- function(feature_name) {
+  LR_edit %>%
+    filter(
+      feature    == feature_name,
+      gene_group == "RASopathy genes",
+      !threshold %in% c("1-4", ">20", ">50")
+    ) %>%
+    mutate(data_set = case_when(
+      data_set == "clinvar_unique_public"  ~ "ClinVar unique",
+      data_set == "clinvar_long_public"    ~ "ClinVar count-weighted",
+      data_set == "DNMs_31k_long_public"   ~ "DNM count-weighted",
+      data_set == "DNMs_31k_unique_public" ~ "DNM unique",
+      TRUE ~ data_set
+    )) %>%
+    mutate(data_set = factor(data_set,
+                             levels = c("DNM count-weighted", "DNM unique",
+                                        "ClinVar unique", "ClinVar count-weighted")))
+}
 
-p_supp3_neg <- LR_supp3 %>%
-  filter(threshold == ">0") %>%
-  mutate(threshold = "= 0") %>%
-  ggplot(aes(y = data_set, x = LR_neg)) +
-  geom_errorbarh(aes(xmin = LR_neg_low95, xmax = LR_neg_high95),
-                 height = 0.2, alpha = 0.7) +
-  geom_vline(data = acmg_lr_neg, aes(xintercept = lr),
-             linetype = "dotted", colour = "grey40", linewidth = 0.5, inherit.aes = FALSE) +
-  geom_text(data = acmg_lr_neg, aes(x = lr, y = Inf, label = level),
-            angle = 90, colour = "grey50", size = 3, vjust = 1, hjust = 1.1, inherit.aes = FALSE) +
-  geom_point(size = 2) +
-  scale_x_log10() +
-  facet_wrap(~ threshold, ncol = 1) +
-  labs(x = "Negative likelihood ratio", y = "") +
-  theme_bw() +
-  coord_cartesian(clip = "off") +
-  theme(plot.margin = margin(5.5, 20, 5.5, 5.5))
+make_lr_pos_plot <- function(plot_data, title = NULL) {
+  ggplot(plot_data, aes(y = data_set, x = LR_pos)) +
+    geom_errorbarh(aes(xmin = LR_pos_low95, xmax = LR_pos_high95),
+                   height = 0.2, alpha = 0.7) +
+    geom_vline(data = acmg_lr_pos, aes(xintercept = lr),
+               linetype = "dotted", colour = "grey40", linewidth = 0.5, inherit.aes = FALSE) +
+    geom_text(data = acmg_lr_pos, aes(x = lr, y = Inf, label = level),
+              angle = 90, colour = "grey50", size = 3, vjust = 1, hjust = 1.1, inherit.aes = FALSE) +
+    geom_point(size = 2) +
+    scale_x_log10() +
+    facet_wrap(~ factor(threshold, levels = c(">0", ">1", ">2", ">3", ">5", ">10")), ncol = 1) +
+    labs(x = "Positive likelihood ratio", y = "", title = title) +
+    theme_bw() +
+    coord_cartesian(clip = "off") +
+    theme(plot.margin = margin(5.5, 20, 5.5, 5.5))
+}
 
-supp_fig3 <- p_supp3_pos / p_supp3_neg + plot_layout(heights = c(10, 1.5))
-print(supp_fig3)
+make_lr_neg_plot <- function(plot_data) {
+  plot_data %>%
+    filter(threshold == ">0") %>%
+    mutate(threshold = "= 0") %>%
+    ggplot(aes(y = data_set, x = LR_neg)) +
+    geom_errorbarh(aes(xmin = LR_neg_low95, xmax = LR_neg_high95),
+                   height = 0.2, alpha = 0.7) +
+    geom_vline(data = acmg_lr_neg, aes(xintercept = lr),
+               linetype = "dotted", colour = "grey40", linewidth = 0.5, inherit.aes = FALSE) +
+    geom_text(data = acmg_lr_neg, aes(x = lr, y = Inf, label = level),
+              angle = 90, colour = "grey50", size = 3, vjust = 1, hjust = 1.1, inherit.aes = FALSE) +
+    geom_point(size = 2) +
+    scale_x_log10() +
+    facet_wrap(~ threshold, ncol = 1) +
+    labs(x = "Negative likelihood ratio", y = "") +
+    theme_bw() +
+    coord_cartesian(clip = "off") +
+    theme(plot.margin = margin(5.5, 20, 5.5, 5.5))
+}
+
+LR_panelA <- make_lr_panel_data("n_COSMIC_codon_count")
+LR_panelB <- make_lr_panel_data("n_COSMIC_genome_codon_count")
+
+col_a <- make_lr_pos_plot(LR_panelA, "(a) Panels plus\ngenome/exome") /
+  make_lr_neg_plot(LR_panelA) + plot_layout(heights = c(10, 1.5))
+col_b <- make_lr_pos_plot(LR_panelB, "(b) Genome/exome only") /
+  make_lr_neg_plot(LR_panelB) + plot_layout(heights = c(10, 1.5))
+
+supp_fig5 <- col_a | col_b
+print(supp_fig5)
 
 ggsave("../../Data/Figures/Final/Supplement/COSMIC_codon_count_LR_thresholds_by_data_type.png",
-       supp_fig3, width = 4, height = 8, dpi = 300)
+       supp_fig5, width = 8, height = 8, dpi = 300)
 ```

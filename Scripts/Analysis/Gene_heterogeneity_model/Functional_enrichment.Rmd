@@ -1,0 +1,320 @@
+---
+title: "Gene-level heterogeneity: functional enrichment (informative vs non-informative)"
+output:
+  html_document:
+    df_print: paged
+    code_folding: hide
+    toc: true
+    toc_float: true
+---
+
+# Aim
+
+Descriptive complement to the model: which functional
+categories distinguish **somatic-informative** (confident positive) from
+**non-informative** (confident negative) dominant DDG2P genes. Tested across
+**four term sources**, each using the same Fisher's-exact / Haldane-corrected
+odds-ratio engine and a single shared BH-FDR correction:
+
+| Source | What | R access | ID bridge needed? |
+|---|---|---|---|
+| GO: Biological Process | `org.Hs.eg.db` (GOALL, propagated) | package | no (SYMBOL keytype) |
+| GO: Molecular Function | ″ | package | no |
+| PANTHER protein class | `PANTHER.db` | package | yes — SYMBOL to ENTREZ via `org.Hs.eg.db` |
+| BioCarta pathways (MSigDB C2:CP:BIOCARTA) | `msigdbr` | package | no |
+
+GO Cellular Component was
+also excluded: subcellular-localisation terms are less
+biologically interpretable for this question than BP/MF, and dropping the
+namespace further reduces the number of terms tested. KEGG (MSigDB
+C2:CP:KEGG_LEGACY) was excluded as not very informative for
+this question.
+
+**No external file needs to be staged** for any of these — everything comes
+from installed R/Bioconductor packages (`org.Hs.eg.db`, `GO.db`, `PANTHER.db`,
+`msigdbr`). The engine is generalised from 3 GO namespaces to all 4 sources above.
+
+Further sources that exist but were **not** included here because they require
+staging an external file rather than an R package (flagged as possible future
+additions, not implemented): Human Phenotype Ontology (HPO) gene-to-phenotype
+annotations, CORUM protein complexes, HGNC gene groups/families, and
+transcription-factor regulon databases (e.g. DoRothEA).
+
+```{r setup, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(tidytext)   # reorder_within / scale_y_reordered
+theme_set(theme_bw(11))
+
+.orgdb <- org.Hs.eg.db::org.Hs.eg.db
+.godb  <- GO.db::GO.db
+
+MIN_GENES        <- 6     # term must be present in > 5 labelled genes (global filter)
+                           # (rare terms give unstable ORs and add to the multiple-testing burden
+                           # for no real benefit, so they are dropped before any statistics are run)
+MIN_DOM_PCT      <- 0.10  # and in > 10% of the class it is enriched in (usefulness)
+                           # (a term can pass MIN_GENES yet still only cover a handful of genes
+                           # within its "favoured" class -- this second filter, applied only when
+                           # building the figure, keeps the plot to terms that are actually common
+                           # within the class they characterise, not just statistically significant)
+TOP_N_PER_FACET  <- 6     # comprehensive per-source figure: top terms per (source, direction)
+
+# Only the comprehensive per-source figure is saved (supplement only; no
+# headline/main-text figure for this analysis).
+OUT_FIG_FULL   <- "../../../Data/Figures/Final/Supplement/Gene_heterogeneity_enrichment_full.png"
+OUT_TAB        <- "../../../Data/ML_model_input/gene_heterogeneity_enrichment_terms_all_sources.csv"
+```
+
+```{r labels}
+# Re-use the SAME per-gene labels (positive/negative/grey) that
+# Gene_utility_model.Rmd trains on, so "informative" here means exactly the
+# same thing as "positive" there (confident somatic utility, AUC lower CI >
+# 0.70) -- only the analysis built on top of the labels differs (a predictive
+# model there, a descriptive enrichment scan here). Grey-zone genes are
+# dropped: this is a two-group (informative vs non-informative) contrast, not
+# a prediction task, so there is nothing to do with an unlabelled gene here.
+feat <- read_csv("../../../Data/ML_model_input/gene_heterogeneity_feature_matrix.csv",
+                 show_col_types = FALSE)
+lab <- feat %>% filter(label %in% c("positive", "negative")) %>%
+  transmute(gene, class = if_else(label == "positive", "informative", "non_informative"))
+nP <- sum(lab$class == "informative"); nN <- sum(lab$class == "non_informative")
+cat(sprintf("informative (positive): %d | non-informative (negative): %d\n", nP, nN))
+genes <- unique(lab$gene)
+```
+
+# 1. Build term membership from all four sources
+
+Each builder returns a long table `gene | term_id | term_name | source`,
+restricted to the labelled genes.
+
+```{r go-terms, message=FALSE, warning=FALSE}
+# Cellular Component is excluded: subcellular localisation
+# terms are less biologically interpretable for this question than BP/MF, and
+# dropping the CC namespace further reduces the multiple-testing burden.
+#
+# AnnotationDbi::select() with keytype "SYMBOL" and columns "GOALL"/"ONTOLOGYALL"
+# looks up every GO term annotated to each of our genes, INCLUDING terms
+# inherited from more general parent terms in the GO hierarchy ("ALL"/
+# "propagated", as opposed to just the most specific term(s) directly
+# annotated) -- e.g. a gene annotated to a very specific term also picks up
+# all of that term's ancestor terms. This is standard practice for GO
+# enrichment: without it, genes would only match the most specific term
+# curators happened to use, and broader/more common terms would be
+# under-counted.
+go_raw <- suppressWarnings(suppressMessages(AnnotationDbi::select(
+  .orgdb, keys = genes, keytype = "SYMBOL", columns = c("GOALL", "ONTOLOGYALL"))))
+go_long <- go_raw %>%
+  filter(!is.na(GOALL), ONTOLOGYALL %in% c("BP", "MF")) %>%
+  distinct(gene = SYMBOL, term_id = GOALL, ONT = ONTOLOGYALL) %>%
+  mutate(source = paste0("GO:", ONT)) %>%
+  select(-ONT)
+
+# GO only stores term IDs (e.g. "GO:0006915"); GO.db is the separate lookup
+# table that translates an ID into its human-readable name (e.g. "apoptotic
+# process") -- needed so the eventual figure/table shows names, not bare IDs.
+go_names <- suppressMessages(AnnotationDbi::select(
+  .godb, keys = unique(go_long$term_id), keytype = "GOID", columns = "TERM")) %>%
+  transmute(term_id = GOID, term_name = TERM)
+go_long <- left_join(go_long, go_names, by = "term_id")
+cat("GO gene-term pairs (BP+MF only, propagated):", nrow(go_long), "\n")
+```
+
+```{r panther-terms, message=FALSE, warning=FALSE}
+# PANTHER.db keys on ENTREZ/UNIPROT, not SYMBOL -- bridge via org.Hs.eg.db.
+# Step 1: translate our gene symbols to Entrez IDs (the ID system PANTHER.db
+# actually understands), using the same org.Hs.eg.db package used for GO above.
+entrez_map <- suppressWarnings(suppressMessages(AnnotationDbi::select(
+  .orgdb, keys = genes, keytype = "SYMBOL", columns = "ENTREZID"))) %>%
+  filter(!is.na(ENTREZID)) %>% distinct(gene = SYMBOL, ENTREZID)
+
+# Step 2: look up each Entrez ID's PANTHER "protein class" annotation(s) --
+# broad functional categories such as "kinase" or "transcription factor",
+# distinct from (and coarser-grained than) GO terms or pathway membership.
+panther_raw <- suppressWarnings(suppressMessages(AnnotationDbi::select(
+  PANTHER.db::PANTHER.db, keys = unique(entrez_map$ENTREZID), keytype = "ENTREZ",
+  columns = c("CLASS_ID", "CLASS_TERM"))))
+
+# Step 3: join back from Entrez ID to our original gene symbol, so this table
+# has the same "gene | term_id | term_name | source" shape as the GO table
+# above and can be stacked with it later.
+panther_long <- panther_raw %>%
+  filter(!is.na(CLASS_ID)) %>%
+  inner_join(entrez_map, by = c("ENTREZ" = "ENTREZID")) %>%
+  transmute(gene, term_id = CLASS_ID, term_name = CLASS_TERM, source = "PANTHER class") %>%
+  distinct()
+cat("PANTHER gene-class pairs:", nrow(panther_long), "\n")
+```
+
+```{r msigdbr-terms, message=FALSE, warning=FALSE}
+# msigdbr() argument/column names: collection/subcollection and gene_symbol as of
+# msigdbr >= 9. If your installed version predates this, msigdbr_collections()
+# will show category/subcategory instead -- swap the argument names below
+# accordingly. (KEGG (CP:KEGG_LEGACY) was tested but excluded -- author
+# decision, not very informative for this question.)
+library(msigdbr)
+
+# Helper: pull one MSigDB gene-set collection (optionally a specific
+# sub-collection, e.g. the BioCarta pathways within collection "C2"),
+# restrict to our labelled genes, and reshape gene-set names (which MSigDB
+# stores as terse, all-caps, underscore-separated IDs, e.g.
+# "BIOCARTA_MAPK_PATHWAY") into a more readable sentence-case label with the
+# source-specific prefix stripped, for display in the eventual figure/table.
+pull_msig <- function(collection, subcollection = NULL, label) {
+  d <- if (is.null(subcollection))
+    msigdbr(species = "Homo sapiens", collection = collection)
+  else
+    msigdbr(species = "Homo sapiens", collection = collection, subcollection = subcollection)
+  d %>%
+    filter(gene_symbol %in% genes) %>%
+    transmute(gene = gene_symbol, term_id = gs_name,
+              term_name = str_to_sentence(str_replace_all(str_remove(gs_name, "^[A-Z]+_"), "_", " ")),
+              source = label)
+}
+
+# Only BioCarta is pulled from MSigDB, alongside the GO and PANTHER sources
+# above (Hallmark, Reactome, and WikiPathways are not included) -- this keeps
+# the multiple-testing burden manageable and the results easier to interpret.
+msig_long <- pull_msig("C2", "CP:BIOCARTA", "BioCarta")
+cat("MSigDB gene-set pairs (BioCarta):",
+    nrow(msig_long), "\n")
+msig_long %>% count(source, name = "gene_term_pairs") %>% knitr::kable()
+```
+
+```{r combine-terms}
+# Stack all four term sources into one long "gene | term_id | term_name |
+# source" table, then restrict to genes with a positive/negative label
+# (inner_join with `lab`, which also attaches each gene's class) and drop any
+# duplicate rows. From this point on, the four sources are treated completely
+# uniformly by the shared enrichment engine below -- the only thing that
+# differs between them is which rows of `all_long` have which `source` value.
+all_long <- bind_rows(go_long, panther_long, msig_long) %>%
+  inner_join(lab, by = "gene") %>%
+  distinct(gene, term_id, term_name, source, class)
+
+all_long %>% distinct(source, term_id) %>% count(source, name = "n_terms_present") %>%
+  knitr::kable(caption = "Distinct terms present in the labelled genes, per source (before frequency filtering)")
+```
+
+# 2. Combined enrichment engine (single shared BH-FDR)
+
+```{r enrich}
+# For every (source, term) pair, build a 2x2 contingency table of
+#   a = informative genes WITH this term      b = informative genes WITHOUT it
+#   c = non-informative genes WITH this term  d = non-informative genes WITHOUT it
+# and compute a Haldane-Anscombe-corrected odds ratio (+0.5 added to every
+# cell before the OR/CI calculation, which prevents divide-by-zero / infinite
+# ORs when a term happens to be present in zero genes of one class -- a
+# standard correction for exactly this small-count 2x2 setting) plus a
+# log-scale 95% CI and a Fisher's exact test p-value (chosen over a
+# chi-squared test because several cells here are small counts, where
+# Fisher's exact is the more reliable test).
+enrich <- all_long %>%
+  count(source, term_id, term_name, class, name = "k") %>%
+  pivot_wider(names_from = class, values_from = k, values_fill = 0) %>%
+  mutate(informative = coalesce(informative, 0L),
+         non_informative = coalesce(non_informative, 0L)) %>%
+  filter(informative + non_informative >= MIN_GENES) %>%     # >5 labelled genes
+  mutate(
+    a = informative, c = non_informative,
+    b = nP - a,      d = nN - c,
+    OR = ((a + 0.5) * (d + 0.5)) / ((b + 0.5) * (c + 0.5)),
+    se_lnor = sqrt(1/(a+0.5) + 1/(b+0.5) + 1/(c+0.5) + 1/(d+0.5)),
+    or_lo = exp(log(OR) - 1.96 * se_lnor),
+    or_hi = exp(log(OR) + 1.96 * se_lnor),
+    p = pmap_dbl(list(a, b, c, d), \(a,b,c,d)
+          fisher.test(matrix(c(a, b, c, d), nrow = 2, byrow = TRUE))$p.value),
+    pct_info = a / nP, pct_noninfo = c / nN)
+# Every term from every source is corrected together in ONE Benjamini-Hochberg
+# FDR pass (not once per source), because the search really is this broad --
+# correcting each source separately would understate the true false-discovery
+# risk of having tested hundreds of terms across four different databases.
+enrich$q <- p.adjust(enrich$p, "BH")   # one FDR domain across ALL sources/terms tested
+
+write_csv(enrich %>% arrange(desc(OR)), OUT_TAB)
+cat("terms tested (all sources, combined FDR domain):", nrow(enrich),
+    "| wrote", OUT_TAB, "\n")
+enrich %>% count(source, name = "terms_tested_after_min_genes_filter") %>% knitr::kable()
+```
+
+# 3. Comprehensive figure — top terms per source x direction
+
+```{r figure-full, fig.width=9, fig.height=6}
+# Build the plotting table `comp` ("comprehensive") from the full enrichment
+# results:
+#  1. log2(OR) > 0 means the term is enriched among informative genes
+#     ("success"); < 0 means enriched among non-informative genes ("failure").
+#  2. `dom_pct` = the fraction of genes IN THE CLASS THE TERM FAVOURS that
+#     actually carry the term, then only terms above MIN_DOM_PCT (>10%) are
+#     kept -- this removes technically-significant-but-practically-rare terms
+#     (e.g. a term enriched in informative genes but only present in 2 of 40
+#     of them) that would otherwise clutter the figure without being useful.
+#  3. Within each (source, direction) group, keep only the TOP_N_PER_FACET
+#     terms with the largest |log2(OR)| -- otherwise a source with hundreds of
+#     significant terms would dominate the figure.
+comp <- enrich %>%
+  mutate(l2or = log2(OR),
+         direction = if_else(l2or >= 0, "Predicts somatic data success", "Predicts somatic data failure"),
+         dom_pct = if_else(l2or >= 0, pct_info, pct_noninfo)) %>%
+  filter(dom_pct > MIN_DOM_PCT) %>%
+  group_by(source, direction) %>%
+  slice_max(abs(l2or), n = TOP_N_PER_FACET, with_ties = FALSE) %>%
+  ungroup() %>%
+  # Rows within each source panel are ordered first by direction, then by odds
+  # ratio -- success terms (OR > 1) all appear before failure terms (OR < 1).
+  # This is achieved with a SINGLE sort key (raw OR, descending): every success
+  # term's OR exceeds every failure term's OR by definition, so ordering by OR
+  # alone reproduces the direction-then-OR ordering, with the strongest success
+  # term at the top and the strongest failure term at the bottom.
+  # Truncated at 85 chars (not 42) -- term names run up to 95 chars in this
+  # data, and 42 was clipping most GO Biological Process terms; 85 covers all
+  # but the handful of longest names, with the plot widened to fit.
+  mutate(lab = str_trunc(term_name, 85),
+         lab = reorder_within(lab, OR, source),
+         sig = if_else(q < 0.05, "FDR<0.05", "ns"))
+
+n_facet_rows <- n_distinct(comp$source)
+
+# OR > 1 = term enriched among INFORMATIVE (somatic-success) genes;
+# OR < 1 = term enriched among NON-INFORMATIVE (somatic-failure) genes. This
+# is stated explicitly as a subtitle (top of the figure) so the direction
+# cannot be misread.
+direction_lab <- "<-- somatic data uninformative   |   somatic data predicts pathogenicity -->"
+subtitle_lab <- sprintf("Top %d terms per source x direction; terms in >%d genes and >%.0f%% of the favoured class\n%s",
+                        TOP_N_PER_FACET, MIN_GENES - 1, 100 * MIN_DOM_PCT, direction_lab)
+
+# One forest-plot row per surviving term, coloured by FDR significance,
+# faceted into one row-block per source (facet_grid(source ~ .)) with
+# scales/space "free_y" so each source's block is only as tall as the number
+# of terms it actually contributed (a source with 3 terms doesn't take up as
+# much vertical space as one with 24). reorder_within()/scale_y_reordered()
+# (from `tidytext`, loaded in setup) let each source's terms be sorted by
+# their own OR independently, even though they all share one y-axis.
+fig_full <- ggplot(comp, aes(OR, lab, colour = sig)) +
+  geom_vline(xintercept = 1, linetype = "dashed", colour = "grey50") +
+  geom_pointrange(aes(xmin = or_lo, xmax = or_hi), fatten = 1.5) +
+  scale_y_reordered() +
+  scale_x_log10(labels = scales::label_number(big.mark = "", drop0trailing = TRUE)) +
+  scale_colour_manual(values = c("FDR<0.05" = "#B2182B", "ns" = "grey55"), name = NULL) +
+  facet_grid(source ~ ., scales = "free_y", space = "free_y") +
+  labs(title = "Functional enrichment in informative vs non-informative genes",
+       subtitle = subtitle_lab,
+       x = "Odds ratio (log scale)", y = NULL) +
+  theme(strip.text.y = element_text(angle = 0, hjust = 0), axis.text.y = element_text(size = 7),
+        plot.subtitle = element_text(size = 9),
+        # extra right margin so the horizontal (angle = 0) source strip labels
+        # (e.g. "PANTHER class") aren't truncated against the plot edge
+        plot.margin = margin(t = 5.5, r = 30, b = 5.5, l = 5.5))
+
+ggsave(OUT_FIG_FULL, fig_full, width = 9, height = 6, dpi = 300)
+fig_full
+```
+
+> Notes: default contrast is confident positives vs confident negatives; if rare
+> terms are underpowered, widen "informative" to AUC lower-CI > 0.6 (~138 genes)
+> for this descriptive layer only. FDR correction is applied ONCE across all
+> terms from all 4 sources combined (the honest multiple-testing domain for a
+> search this broad). GO/PANTHER/pathway annotation is biased toward
+> well-studied genes (absence of a term is not evidence of absence). This
+> enrichment is descriptive and independent of the predictive model's feature
+> set (the model does not use these terms, to avoid the high-cardinality
+> overfitting risk of adding ~1,036 sparse binary terms as features alongside
+> only 124 labelled genes).

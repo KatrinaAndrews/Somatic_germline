@@ -1,0 +1,333 @@
+---
+title: "Gene-level heterogeneity: build per-gene feature matrix"
+output:
+  html_document:
+    df_print: paged
+    code_folding: hide
+    toc: true
+    toc_float: true
+---
+
+# Aim
+
+Assemble the per-gene table used by the gene-level heterogeneity model: the
+**label** (confident somatic-utility positive / negative / grey zone) plus the
+**non-network features**. The network-proximity
+feature is *not* built here — it is fold-aware and is computed inside
+`Gene_utility_model.Rmd`.
+
+Scope: **all monoallelic (dominant) DDG2P genes** are scored, but the model is
+only *trained* on the subset that is **benchmarking-eligible** (>=10 unique
+pathogenic AND >=10 unique benign ClinVar variants) and confidently classified
+(see labels below). Utility is defined on **COSMIC** codon-count AUC
+(sperm/buccal too sparse per gene). None of the model's features require
+ClinVar variant counts to compute (they come from DDG2P, COSMIC CGC, gnomAD,
+cancerhotspots, and STRING), so genes with too few (or zero) ClinVar variants
+to benchmark individually can still be scored by the fitted model -- this is
+the "grey zone" and is deliberately NOT restricted to the benchmarking-eligible
+set, so the model's predictions extend to genes we cannot yet benchmark at all.
+
+Labels (ClinVar count-weighted, `n_COSMIC_codon_count`), among benchmarking-eligible genes only:
+- **positive** = AUC lower CI > 0.70
+- **negative** = AUC upper CI < 0.60 AND >=15 unique pathogenic
+- **grey**     = every other monoallelic DDG2P gene, whether benchmarking-eligible
+  or not (scored, not trained on)
+
+```{r setup, message=FALSE, warning=FALSE}
+library(tidyverse)
+theme_set(theme_bw(12))
+
+# ---- input file path and column names (edit if the source file differs) ----
+# gnomAD v4.1 gene constraint metrics tsv (public: gnomad.broadinstitute.org).
+# Expected columns used below: gene, mane_select, lof.oe_ci.upper (=LOEUF),
+# mis.oe (=MOEUF), mis.exp (=expected missense). Adjust names here if the file
+# differs.
+GNOMAD_CONSTRAINT_FILE <- "../../../Data/Gnomad/gnomad.v4.1.constraint_metrics.tsv"
+# COL_* below just record which column in GNOMAD_CONSTRAINT_FILE holds which
+# piece of information, so the rest of the script can refer to e.g. COL_LOEUF
+# rather than a hard-coded column name -- if gnomAD ever renames a column, or
+# a differently-formatted file is used, only these four lines need editing
+# rather than hunting through the rest of the script.
+COL_GENE   <- "gene"             # gene symbol column
+COL_MANE   <- "mane_select"      # TRUE/FALSE: is this row the MANE-select transcript for the gene?
+COL_LOEUF  <- "lof.oe_ci.upper"  # LOEUF = loss-of-function observed/expected upper bound (constraint metric)
+COL_MOEUF  <- "mis.oe"           # missense observed/expected ratio (constraint metric)
+COL_EXPMIS <- "mis.exp"          # expected number of missense variants for this gene (proxy for gene size/mutability)
+
+# Where the finished per-gene feature matrix gets written; this is the single
+# file that Gene_utility_model.Rmd and Functional_enrichment.Rmd both read in
+# as their starting point.
+OUT_FILE <- "../../../Data/ML_model_input/gene_heterogeneity_feature_matrix.csv"
+```
+
+# 1. Labels
+
+```{r labels, message=FALSE, warning=FALSE}
+# monoallelic (dominant) DDG2P universe. Restricted to the two categories used
+# throughout the manuscript (Methods, "Gene mechanism classification"):
+# monoallelic_autosomal and monoallelic_X_heterozygous. NB: monoallelic_X_HEMIZYGOUS
+# is a distinct category (X-linked, hemizygous males) and is NOT included here --
+# a naive str_detect(..., "monoallelic") substring match would incorrectly pull
+# it in too, since "monoallelic_X_hemizygous" also contains the substring
+# "monoallelic". Many DDG2P genes have multiple disease-row entries with
+# different allelic requirements (e.g. a gene can cause one disease dominantly
+# and a different disease recessively); pull() %>% unique() below correctly
+# keeps a gene if ANY of its disease rows matches, which is intended.
+## Step 1a: which genes are in scope? (monoallelic/dominant DDG2P genes)
+# G2P_DD_2025-04-16.csv is the raw DDG2P export: one row per gene-disease
+# association (so the SAME gene can appear on multiple rows, e.g. once for a
+# dominant disease and once for an unrelated recessive disease). We clean the
+# column names (janitor::clean_names() lower-cases and underscore-separates
+# them, e.g. "allelic requirement" -> "allelic_requirement") and then filter
+# to just the monoallelic (dominant-acting) disease rows before pulling out
+# the distinct gene symbols involved.
+g2p <- read_csv("../../../Data/DDG2P/G2P_DD_2025-04-16.csv", show_col_types = FALSE) %>%
+  janitor::clean_names()
+MONOALLELIC_CATEGORIES <- c("monoallelic_autosomal", "monoallelic_X_heterozygous")
+mono_genes <- g2p %>%
+  filter(allelic_requirement %in% MONOALLELIC_CATEGORIES) %>%
+  pull(gene_symbol) %>% unique()
+
+## Step 1b: load the two ingredients needed to build the utility LABEL
+# `auc`: for each gene, how well does COSMIC missense codon count
+# discriminate that gene's pathogenic vs benign ClinVar variants? This
+# AUC (and its 95% CI) was already computed by an earlier stage of the
+# pipeline (per-gene hold-out benchmarking); here we just read it back in and
+# keep only the row for the specific predictor/dataset combination we care
+# about (COSMIC missense codon count, ClinVar count-weighted form).
+auc <- read_csv("../../../Data/AUC_tables/Gene_group_hold_out_models/Single_feature_AUCs_individual_genes_240426.csv",
+                show_col_types = FALSE) %>%
+  filter(Predictor == "n_COSMIC_codon_count", dataset == "clinvar_long") %>%
+  transmute(gene = trimws(gene), auc = AUC_full,
+            auc_lower = AUC_full_lower, auc_upper = AUC_full_upper)
+
+# `vc`: for each gene, how many unique pathogenic / benign ClinVar variants
+# were available to compute that AUC from? We need this alongside the AUC
+# itself because the label definitions below require a minimum variant count
+# before trusting the AUC (an AUC computed from only a handful of variants is
+# not reliable evidence either way).
+vc <- read_csv("../../../Data/AUC_tables/Gene_group_hold_out_models/Variant_counts_per_gene_240426.csv",
+               show_col_types = FALSE) %>%
+  filter(data_set == "clinvar_mutation_data_unique") %>%
+  transmute(gene = trimws(gene), n_path_unique = n_path_variants,
+            n_benign_unique = n_benign_variants)
+
+
+# Start from the FULL monoallelic universe (not just benchmarking-eligible
+# genes), so grey-zone scoring later extends to genes with too few (or zero)
+# ClinVar variants to benchmark individually. auc/vc are left-joined, so these
+# genes simply carry NA auc/auc_lower/auc_upper/n_path_unique/n_benign_unique
+# -- informative missingness (no benchmarking data available yet), not used as
+# a model feature. `eligible` reproduces the original benchmarking-eligibility
+# gate and is applied ONLY to the positive/negative label conditions, so the
+# positive/negative definitions and counts are unchanged from before; only the
+# grey-zone set grows to cover the full monoallelic universe.
+# Build the working table: start with ONE row per monoallelic gene (this is
+# the full universe we want the final feature matrix to cover), then
+# left_join on the AUC and variant-count tables. Because this is a left join
+# FROM the full gene list, any gene that isn't in `auc`/`vc` at all (e.g. it
+# never had enough ClinVar variants to even attempt an AUC) simply gets NA
+# for those columns, rather than being dropped from the table -- this is
+# exactly what lets grey-zone scoring extend beyond the benchmarking-eligible
+# genes later.
+labels <- tibble(gene = mono_genes) %>%
+  left_join(auc, by = "gene") %>%
+  left_join(vc, by = "gene") %>%
+  mutate(
+    # `eligible`: does this gene have enough data to trust an AUC-based label
+    # at all? Requires a non-missing AUC (i.e. it was possible to compute
+    # one) AND at least 10 unique pathogenic and 10 unique benign ClinVar
+    # variants. Genes failing this (including all the NA ones from the left
+    # join above) cannot be called "positive" or "negative" below, no matter
+    # what their AUC looks like.
+    eligible = !is.na(auc_lower) & !is.na(n_path_unique) & !is.na(n_benign_unique) &
+               n_path_unique >= 10 & n_benign_unique >= 10,
+    # The three-way label itself, evaluated top-to-bottom (case_when takes
+    # the first matching condition per row):
+    #   "positive" -- eligible, AND the AUC's lower 95% CI bound is > 0.70.
+    #                 Using the LOWER bound (not the point estimate) is a
+    #                 conservative choice: we only call a gene confidently
+    #                 high-utility if we're confident even in the worst
+    #                 plausible case.
+    #   "negative" -- eligible, AND the AUC's upper 95% CI bound is < 0.60,
+    #                 AND there are at least 15 (not just 10) unique
+    #                 pathogenic variants -- a slightly higher bar than plain
+    #                 eligibility, so "negative" genes are genuinely
+    #                 well-powered rather than sitting right at the minimum.
+    #   "grey"      -- everything else: not eligible at all, OR eligible but
+    #                 with an AUC confidence interval that doesn't clearly
+    #                 fall on either side of the two thresholds above. These
+    #                 genes are scored by the fitted model later but are
+    #                 never used to train it.
+    label = case_when(
+      eligible & auc_lower > 0.70                       ~ "positive",
+      eligible & auc_upper < 0.60 & n_path_unique >= 15  ~ "negative",
+      TRUE                                               ~ "grey"
+    ),
+    # Mask the raw AUC/CI to NA for any gene that isn't `eligible`. Without
+    # this, a gene can carry a non-NA AUC here purely because it cleared the
+    # count-weighted ("clinvar_long") ClinVar-submission-count gate used to
+    # build the `auc` table above, even though it has fewer than 10 unique
+    # pathogenic and/or 10 unique benign ClinVar variants -- the threshold
+    # used everywhere else in the manuscript to decide whether an
+    # individual-gene AUC is meaningful. Grey-zone genes should only ever
+    # display an AUC that meets that same bar.
+    auc       = if_else(eligible, auc,       NA_real_),
+    auc_lower = if_else(eligible, auc_lower, NA_real_),
+    auc_upper = if_else(eligible, auc_upper, NA_real_)
+  ) %>%
+  select(-eligible)  # only needed to compute `label`; not a model feature itself
+
+labels %>% count(label) %>% knitr::kable(caption = "Label counts (expect ~40 positive / 84 negative / ~846 grey)")
+cat("Total monoallelic genes scored (labelled + grey):", nrow(labels),
+    "(expect ~970, matching the manuscript's dominant DD gene universe)\n")
+cat("Of these, benchmarking-eligible (>=10 unique path & benign variants):",
+    sum(!is.na(labels$auc_lower) & !is.na(labels$n_path_unique) & !is.na(labels$n_benign_unique) &
+        labels$n_path_unique >= 10 & labels$n_benign_unique >= 10),
+    "(expect ~390)\n")
+```
+
+# 2. Non-network features
+
+```{r features-mech, message=FALSE, warning=FALSE}
+# --- DD mechanism: two independent binary flags, computed directly from the
+# raw DDG2P disease-row entries (`g2p`, loaded above) rather than from a
+# precomputed gene-level summary file. A gene can be dd_altfunc, dd_lof, both,
+# or neither. Critically, BOTH the allelic-requirement and variant-consequence
+# conditions are required on the SAME disease row: a gene with one monoallelic
+# disease (e.g. dominant) and a separate biallelic disease (recessive LOF)
+# must not have that unrelated recessive-disease mechanism attributed to it as
+# a "monoallelic" flag (this is the same disease-row-granularity issue fixed
+# for the mono_genes filter above).
+#   dd_altfunc = monoallelic disease row(s) with variant_consequence containing
+#                "altered gene product structure"
+#   dd_lof     = monoallelic disease row(s) with variant_consequence containing
+#                "absent gene product" or "decreased gene product level"
+dd_mech <- g2p %>%
+  filter(allelic_requirement %in% MONOALLELIC_CATEGORIES) %>%
+  group_by(gene = gene_symbol) %>%
+  summarise(
+    dd_altfunc = as.integer(any(str_detect(variant_consequence,
+                                           fixed("altered gene product structure")))),
+    dd_lof     = as.integer(any(str_detect(variant_consequence, fixed("absent gene product")) |
+                                str_detect(variant_consequence, fixed("decreased gene product level")))),
+    .groups = "drop"
+  )
+
+# NB: a handful of genes have NA (not 0/1) here if EVERY monoallelic disease
+# row for that gene has a missing variant_consequence; na.rm=TRUE below so the
+# printed counts are not silently NA. These NAs are set to 0 (not flagged) in
+# the "assemble" step below (replace_na), so the exported feature matrix is
+# unaffected -- this is just an honest diagnostic printout.
+cat("Monoallelic genes flagged dd_altfunc:", sum(dd_mech$dd_altfunc, na.rm = TRUE),
+    "(NA for", sum(is.na(dd_mech$dd_altfunc)), "genes)\n")
+cat("Monoallelic genes flagged dd_lof:", sum(dd_mech$dd_lof, na.rm = TRUE),
+    "(NA for", sum(is.na(dd_mech$dd_lof)), "genes)\n")
+cat("Monoallelic genes flagged BOTH:",
+    sum(dd_mech$dd_altfunc & dd_mech$dd_lof, na.rm = TRUE), "\n")
+cat("Monoallelic genes flagged NEITHER (of those with both flags known):",
+    sum(!dd_mech$dd_altfunc & !dd_mech$dd_lof, na.rm = TRUE), "\n")
+
+# --- Cancer mechanism: two independent binary flags, mirroring dd_altfunc/
+# dd_lof above, computed with the SAME logic as the manuscript's own AltFunc/
+# LOF gene-group definitions (Scripts/Data_processing_and_annotation/
+# Define_cancer_DD_gene_mechanism_sets.Rmd) -- COSMIC CGC only, no OncoKB.
+#   cancer_oncogene_missense = ROLE_IN_CANCER contains "oncogene" AND
+#                              MUTATION_TYPES contains "Mis" (missense is a
+#                              documented mutation type for this gene; this
+#                              excludes oncogenes driven only by fusion/
+#                              amplification, which would not overlap with
+#                              germline missense variants)
+#   cancer_tsg               = ROLE_IN_CANCER contains "TSG"
+# A gene can be both, neither, or either (independent flags, not mutually
+# exclusive categories).
+cancer_mech <- read_tsv("../../../Data/Gene_definitions/Cosmic_CancerGeneCensus_v98_GRCh37.tsv.gz",
+                        show_col_types = FALSE) %>%
+  transmute(gene = GENE_SYMBOL,
+            cancer_oncogene_missense = as.integer(
+              str_detect(coalesce(ROLE_IN_CANCER, ""), "oncogene") &
+              str_detect(coalesce(MUTATION_TYPES, ""), "Mis")),
+            cancer_tsg = as.integer(str_detect(coalesce(ROLE_IN_CANCER, ""), "TSG"))) %>%
+  distinct(gene, .keep_all = TRUE)
+
+cat("Genes flagged cancer_oncogene_missense:", sum(cancer_mech$cancer_oncogene_missense), "\n")
+cat("Genes flagged cancer_tsg:", sum(cancer_mech$cancer_tsg), "\n")
+cat("Genes flagged BOTH:",
+    sum(cancer_mech$cancer_oncogene_missense & cancer_mech$cancer_tsg), "\n")
+
+# --- Hotspot count = number of hotspot residues listed for the gene (a raw
+# count, not normalised by protein/CDS length -- NOT a density) ---
+hotspots <- read_tsv("../../../Data/Cancer_data/cancerhotspots/hotspots_v2_residues.txt",
+                     show_col_types = FALSE) %>%
+  janitor::clean_names()
+# not anchored to "^gene": the source file has a leading UTF-8 BOM before "Gene",
+# which janitor::clean_names() sometimes preserves as a stray prefix character.
+gcol_h <- names(hotspots)[str_detect(tolower(names(hotspots)), "gene")][1]
+stopifnot(!is.na(gcol_h))
+hotspot_count <- hotspots %>%
+  count(gene = .data[[gcol_h]], name = "hotspot_count")
+```
+
+```{r features-constraint, message=FALSE, warning=FALSE}
+# --- gnomAD constraint: LOEUF, MOEUF, exp_mis ---
+if (!file.exists(GNOMAD_CONSTRAINT_FILE))
+  stop("gnomAD constraint file not found: ", GNOMAD_CONSTRAINT_FILE,
+       "\nStage the gnomAD v4.1 constraint metrics tsv (see setup chunk).")
+
+constraint_raw <- read_tsv(GNOMAD_CONSTRAINT_FILE, show_col_types = FALSE)
+need <- c(COL_GENE, COL_LOEUF, COL_MOEUF, COL_EXPMIS)
+miss <- setdiff(need, names(constraint_raw))
+if (length(miss) > 0)
+  stop("gnomAD constraint file missing expected column(s): ",
+       paste(miss, collapse = ", "),
+       "\nEdit COL_* in the setup chunk to match your file's headers.")
+
+constraint <- constraint_raw
+# keep MANE-select transcript row per gene if that column exists
+if (COL_MANE %in% names(constraint)) {
+  constraint <- constraint %>%
+    filter(tolower(as.character(.data[[COL_MANE]])) %in% c("true", "1", "yes"))
+}
+constraint <- constraint %>%
+  transmute(gene = .data[[COL_GENE]],
+            loeuf  = as.numeric(.data[[COL_LOEUF]]),
+            moeuf  = as.numeric(.data[[COL_MOEUF]]),
+            exp_mis = as.numeric(.data[[COL_EXPMIS]])) %>%
+  distinct(gene, .keep_all = TRUE)
+```
+
+# 3. Assemble and export
+
+```{r assemble, message=FALSE, warning=FALSE}
+feat <- labels %>%
+  left_join(dd_mech,       by = "gene") %>%
+  left_join(cancer_mech,   by = "gene") %>%
+  left_join(hotspot_count,   by = "gene") %>%
+  left_join(constraint,    by = "gene") %>%
+  mutate(
+    # every gene in `labels` has >=1 monoallelic disease row (by construction),
+    # so dd_altfunc/dd_lof are only NA if that row's variant_consequence was
+    # empty for every monoallelic disease of that gene; 0 (not flagged) is the
+    # correct value here, not a missingness case.
+    dd_altfunc               = replace_na(dd_altfunc, 0L),
+    dd_lof                   = replace_na(dd_lof, 0L),
+    cancer_oncogene_missense = replace_na(cancer_oncogene_missense, 0L),
+    cancer_tsg               = replace_na(cancer_tsg, 0L),
+    hotspot_count            = replace_na(hotspot_count, 0L)        # no listed hotspots = 0
+    # loeuf / moeuf / exp_mis: leave NA here; handle (drop/impute) in the model
+    # script and FLAG the missingness explicitly (do NOT silently impute).
+  )
+
+# report constraint missingness explicitly rather than silently imputing
+cat("Genes missing gnomAD constraint (LOEUF NA):",
+    sum(is.na(feat$loeuf)), "of", nrow(feat), "\n")
+
+write_csv(feat, OUT_FILE)
+cat("Wrote feature matrix:", OUT_FILE, "\n")
+feat %>% count(label, dd_altfunc, dd_lof) %>%
+  knitr::kable(caption = "Label x (dd_altfunc, dd_lof) (sanity check)")
+feat %>% count(label, cancer_oncogene_missense, cancer_tsg) %>%
+  knitr::kable(caption = "Label x (cancer_oncogene_missense, cancer_tsg) (sanity check)")
+```
+
+

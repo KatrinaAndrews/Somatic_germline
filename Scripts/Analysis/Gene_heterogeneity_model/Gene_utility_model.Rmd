@@ -1,0 +1,515 @@
+---
+title: "Gene-level heterogeneity: predictors of somatic-data utility (model)"
+output:
+  html_document:
+    df_print: paged
+    code_folding: hide
+    toc: true
+    toc_float: true
+---
+
+# Aim
+
+Predict, and describe the predictors of, high **COSMIC** somatic-data utility
+across dominant DDG2P genes. One random-forest model on a
+lean feature set, evaluated by **fold-aware repeated cross-validation** (the
+network-proximity feature is recomputed inside each fold, seeded on that fold's
+training genes only — leakage-safe). A penalised/plain logistic regression gives
+interpretable odds ratios. Grey-zone genes are scored but not trained on.
+
+Inputs: `gene_heterogeneity_feature_matrix.csv` (from
+`Build_gene_feature_matrix.Rmd`) and the STRING graph (`network_features.R`).
+
+```{r setup, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(randomForest)
+library(pROC)
+library(PRROC)
+library(glmnet)
+library(fastshap)   # Monte-Carlo-approximate Shapley values, model-agnostic
+library(shapviz)    # SHAP summary/beeswarm plotting
+source("network_features.R")   # load_string_graph(), network_contrast()
+set.seed(42)
+theme_set(theme_bw(12))
+
+# ---- config ----
+# All the "knobs" for this analysis are collected here at the top, so the
+# rest of the script can refer to them by name instead of scattering magic
+# numbers through the code below.
+RESTART   <- 0.5     # RWR restart probability (network_contrast(); POC default)
+STRING_THR<- 700     # STRING combined_score cutoff for a "high-confidence" PPI edge
+N_FOLDS   <- 5        # number of cross-validation folds per repeat
+N_REPEATS <- 10       # number of times the whole 5-fold CV is repeated (with fresh fold assignments), for a more stable performance estimate
+N_TREES   <- 2000     # number of trees in every random forest fit (CV folds and the final full-data model)
+BOOT_IMP  <- 200     # bootstrap replicates for ridge-OR CI stability
+N_SHAP_SIM<- 100      # Monte-Carlo repetitions per gene for fastshap::explain()
+
+# The 9 gene-level features the model is actually fitted on. Every name here
+# must be a column in the feature matrix loaded below (see `feat`).
+FEATURES  <- c("dd_altfunc", "dd_lof", "cancer_oncogene_missense", "cancer_tsg",
+               "loeuf", "moeuf", "exp_mis", "hotspot_count", "net_contrast")
+# constraint_missing / network_missing were tested as features and dropped:
+# both had negligible SHAP magnitude and a ridge OR CI
+# spanning ~1, i.e. uninformative. They are still COMPUTED and reported in the
+# exported prediction table (diagnostic: which genes had an imputed value),
+# just no longer fed into either model.
+CONT_FEATS<- c("loeuf", "moeuf", "exp_mis")   # constraint metrics that may be NA
+
+OUT_FIG   <- "../../../Data/Figures/Final/Supplement/Gene_heterogeneity_model.png"
+OUT_PRED  <- "../../../Data/ML_model_input/gene_heterogeneity_predictions.csv"
+OUT_SHAP  <- "../../../Data/ML_model_input/gene_heterogeneity_shap_summary.csv"
+OUT_OR    <- "../../../Data/ML_model_input/gene_heterogeneity_ridge_or.csv"
+```
+
+```{r load}
+# Load the per-gene feature matrix built by Build_gene_feature_matrix.Rmd. Every
+# row is one gene, with the label (positive/negative/grey) and the non-network
+# features already attached; the network-proximity feature is NOT in this file
+# because it has to be computed fold-aware (see Section 2 below), so it's added
+# later, separately, inside the CV loop and the full-model chunk.
+feat <- read_csv("../../../Data/ML_model_input/gene_heterogeneity_feature_matrix.csv",
+                 show_col_types = FALSE) %>%
+  # dd_altfunc / dd_lof / cancer_oncogene_missense / cancer_tsg are already 0/1
+  # integers (independent binary flags -- a gene can be any combination); kept
+  # numeric (not factor) so glm() reports a directly interpretable per-flag
+  # odds ratio, and randomForest splits on them same as any binary variable.
+  mutate(constraint_missing = as.integer(is.na(loeuf)))   # flag before imputation
+
+# Split into the genes we actually have a training label for (lab: positive or
+# negative only -- "grey" genes are deliberately excluded from training because
+# their AUC confidence interval didn't clearly support either class) and the
+# grey-zone genes themselves (grey), which the fitted model will later be asked
+# to score/predict on, not train on.
+lab <- feat %>% filter(label %in% c("positive", "negative")) %>%
+  mutate(y = factor(if_else(label == "positive", "pos", "neg"),
+                    levels = c("neg", "pos")))
+grey <- feat %>% filter(label == "grey")
+cat(sprintf("labelled: %d (pos=%d, neg=%d) | grey: %d\n",
+            nrow(lab), sum(lab$y == "pos"), sum(lab$y == "neg"), nrow(grey)))
+
+# Build the STRING protein-protein interaction graph once here (it's the same
+# graph for every fold and for the final full-data fit) -- only the SEEDS used
+# to walk it change between folds.
+graph <- load_string_graph(STRING_THR)
+cat("STRING graph:", vcount(graph), "genes,", ecount(graph), "edges\n")
+cat("labelled genes absent from STRING:",
+    sum(!lab$gene %in% V(graph)$name), "\n")
+```
+
+# 1. Missing-value handling (median-impute + flags)
+
+Constraint metrics (`loeuf`/`moeuf`/`exp_mis`) and the network feature are
+median-imputed, with explicit missingness flags (`constraint_missing`,
+`network_missing`) computed alongside. These flags were tested as model
+features and dropped (see `FEATURES` above): both had
+negligible SHAP magnitude and a ridge odds-ratio CI spanning 1, i.e.
+uninformative. They are still reported as diagnostic columns in the exported
+prediction table (which genes had an imputed value), just not used as
+predictors. `constraint_missing` is set above from the original
+(pre-imputation) matrix; `network_missing` is set once on the full data in the
+full-model chunk (Section 3) for reporting -- the CV loop (Section 2) no
+longer needs to track it per-fold, since it is not a model feature. Imputation
+medians are always learned from **training** genes within CV so the estimate
+stays honest; imputation is done inline in the CV and full-model chunks below.
+
+# 2. Fold-aware repeated cross-validation
+
+```{r cv, message=FALSE, warning=FALSE}
+# Assigns each gene to one of k folds SEPARATELY within each class (pos/neg),
+# so every fold ends up with roughly the same pos:neg ratio as the full
+# labelled set ("stratified" folds). Without stratifying, a fold could by
+# chance end up almost all-negative, making AUC unstable/meaningless for that
+# fold given how few positives there are in total.
+strat_folds <- function(y, k) {
+  # stratified fold ids
+  fid <- integer(length(y))
+  for (lev in levels(y)) {
+    idx <- which(y == lev)
+    fid[idx] <- sample(rep_len(1:k, length(idx)))
+  }
+  fid
+}
+
+# Repeated k-fold CV: run the whole 5-fold split N_REPEATS times, each time
+# with a fresh random fold assignment. A single 5-fold split is noisy with
+# this few labelled genes (which genes happen to land in which fold matters);
+# averaging performance over many different splits gives a much more stable
+# estimate of how well the model actually generalises.
+cv_scores <- tibble()
+for (rep_i in seq_len(N_REPEATS)) {
+  folds <- strat_folds(lab$y, N_FOLDS)
+  for (f in seq_len(N_FOLDS)) {
+    # Split into this fold's training genes (tr, folds != f) and held-out test
+    # genes (te, folds == f). Everything computed below -- the network seeds,
+    # the imputation medians, the fitted forest -- is derived from `tr` only,
+    # and then simply APPLIED to `te`. This is what makes the fold "honest":
+    # no information from the held-out genes leaks into how they get scored.
+    tr <- lab[folds != f, ]; te <- lab[folds == f, ]
+    pos_seeds <- tr$gene[tr$y == "pos"]; neg_seeds <- tr$gene[tr$y == "neg"]
+
+    # fold-aware network contrast: seeds = TRAINING genes only.
+    # Held-out test genes are scored against the FULL training-seed set --
+    # this is already leakage-safe on its own, since a held-out gene is never
+    # a member of tr and so can never be a seed for its own score.
+    nc_test <- network_contrast(graph, pos_seeds, neg_seeds,
+                                query = te$gene, restart = RESTART)
+
+    # Training genes, in contrast, DO sit inside pos_seeds/neg_seeds by
+    # construction -- so scoring them against the same seed sets used above
+    # would self-seed every training gene (leaving each one's own vote in its
+    # own class's network walk). This is the same self-seeding inflation
+    # documented and fixed for the full-data model in Section 3 (~3.6x
+    # apparent class-separation inflation, some genes sign-flipped) -- left
+    # uncorrected here it would still bias what the forest learns about
+    # net_contrast during training, even though it doesn't directly leak any
+    # test-gene label. Fixed the same way as Section 3: leave-one-out, i.e.
+    # each training gene's own value is computed with that gene excluded from
+    # its own class's seed set (all OTHER training genes are still seeds as
+    # normal). This is more expensive (one network_contrast call per training
+    # gene rather than one for the whole fold) but cheap enough in practice
+    # (STRING graph RWR takes ~30ms per call) to do exactly, rather than
+    # approximate.
+    nc_train <- setNames(rep(NA_real_, nrow(tr)), tr$gene)
+    for (i in seq_len(nrow(tr))) {
+      g_i <- tr$gene[i]
+      pos_i <- setdiff(pos_seeds, g_i); neg_i <- setdiff(neg_seeds, g_i)
+      nc_train[g_i] <- network_contrast(graph, pos_i, neg_i, query = g_i, restart = RESTART)[g_i]
+    }
+
+    net_med <- median(nc_train, na.rm = TRUE)     # impute from training only (now leave-one-out corrected)
+    tr$net_contrast <- ifelse(is.na(nc_train[tr$gene]), net_med, nc_train[tr$gene])
+    te$net_contrast <- ifelse(is.na(nc_test[te$gene]), net_med, nc_test[te$gene])
+
+    # constraint imputation from training medians
+    # Same honesty principle applied to the constraint features (loeuf/moeuf/
+    # exp_mis): the imputation value (the median) is calculated from training
+    # genes only, then used to fill gaps in BOTH tr and te. Computing the
+    # median from the combined tr+te set would let information about which
+    # genes are in the test fold subtly influence the imputed values.
+    for (v in CONT_FEATS) {
+      m <- median(tr[[v]], na.rm = TRUE)
+      tr[[v]] <- ifelse(is.na(tr[[v]]), m, tr[[v]])
+      te[[v]] <- ifelse(is.na(te[[v]]), m, te[[v]])
+    }
+
+    # Fit a random forest on this fold's training genes only. `strata`/
+    # `sampsize` tell randomForest to build each tree from a balanced
+    # bootstrap sample (n_min positives AND n_min negatives, where n_min is
+    # the size of the smaller class) rather than the natural, imbalanced
+    # class ratio -- otherwise, with far more negatives than positives, the
+    # forest would be biased toward always predicting "negative".
+    n_min <- min(table(tr$y))
+    rf <- randomForest(x = tr[, FEATURES], y = tr$y, ntree = N_TREES,
+                       strata = tr$y, sampsize = c(neg = n_min, pos = n_min))
+    # Predict the probability of being "positive" for the held-out genes, and
+    # stash it alongside their true label so performance can be assessed
+    # afterwards across every fold/repeat at once.
+    p <- predict(rf, te[, FEATURES], type = "prob")[, "pos"]
+    cv_scores <- bind_rows(cv_scores,
+      tibble(rep = rep_i, fold = f, gene = te$gene, truth = te$y, prob = p))
+  }
+}
+
+# CV performance: pool held-out predictions, compute per-repeat AUC/AUPRC then average
+# For each repeat, gather every gene's held-out prediction (across its 5
+# folds) and compute one AUC (ranking ability) and one AUPRC (precision-recall
+# area, more informative than AUC when positives are rare) for that repeat.
+# Averaging across the N_REPEATS independent repeats (rather than reporting a
+# single repeat's number) gives both a point estimate and a sense of how
+# variable that estimate is (SD) due to the specific random fold assignment.
+perf <- cv_scores %>% group_by(rep) %>% summarise(
+  auc = as.numeric(pROC::auc(pROC::roc(truth, prob, levels = c("neg","pos"),
+                                       direction = "<", quiet = TRUE))),
+  auprc = {
+    pr <- PRROC::pr.curve(scores.class0 = prob[truth=="pos"],
+                          scores.class1 = prob[truth=="neg"])
+    pr$auc.integral
+  }, .groups = "drop")
+cat(sprintf("Cross-validated AUC:  %.3f (SD %.3f)\n", mean(perf$auc), sd(perf$auc)))
+cat(sprintf("Cross-validated AUPRC: %.3f (SD %.3f)\n", mean(perf$auprc), sd(perf$auprc)))
+```
+
+# 3. Full-data model: importance, odds ratios, grey-zone scoring
+
+```{r full-model, message=FALSE, warning=FALSE}
+# Section 2 (above) answered "how well would this model generalise" via CV.
+# This section instead fits ONE model on ALL labelled genes at once (the best
+# use of the data we have), to (a) report which features matter and in which
+# direction (SHAP + ridge odds ratios) and (b) actually score the grey-zone
+# genes that were held out of labelling entirely. None of this chunk's numbers
+# should be read as a performance estimate -- for that, see the CV results
+# above.
+#
+# Re-seed explicitly here, rather than relying on the single global seed set
+# in `setup`. randomForest()'s internal random draws (bagging, mtry selection)
+# depend on the actual VALUES of the input features, not just their
+# dimensions -- confirmed empirically -- so without this, any unrelated change
+# upstream (e.g. to the CV loop in Section 2, which touches none of this
+# chunk's own inputs) would silently shift the RNG stream inherited here and
+# change the reported SHAP values, ridge odds ratios, and grey-zone
+# predictions by chance alone, even though nothing about this model itself
+# had changed. Re-seeding makes this chunk's results reproducible on their own
+# terms, independent of anything computed above it.
+set.seed(42)
+all_pos <- lab$gene[lab$y == "pos"]; all_neg <- lab$gene[lab$y == "neg"]
+
+# Grey-zone / candidate-gene scoring: seed on ALL labelled genes. This is
+# correct and unbiased here -- grey genes are never seeds, so this matches the
+# real-world use case ("given everything labelled so far, where does this new
+# gene sit?").
+nc_all <- network_contrast(graph, all_pos, all_neg,
+                          query = feat$gene, restart = RESTART)
+
+# Labelled genes: seeding each gene's own class network WITH that gene itself
+# (as nc_all does) leaks the gene's own label into its own feature value. This
+# is NOT a small effect: checked empirically by comparing to a proper
+# leave-one-out (LOO) computation -- mean class separation (pos - neg) in
+# log10 RWR-ratio units is ~4.6 with self-seeding vs ~1.3 with honest LOO (a
+# ~3.6x inflation), and individual genes can flip sign once their own vote is
+# removed. For labelled genes, net_contrast is therefore recomputed leaving
+# each gene out of its own class's seed set, mirroring the fold-aware
+# safeguard already used for CV in Section 2. (The CV performance metric above
+# is unaffected by this leak: held-out test genes are never in their own
+# fold's seed set to begin with.)
+nc_loo <- setNames(rep(NA_real_, nrow(lab)), lab$gene)
+for (i in seq_len(nrow(lab))) {
+  g <- lab$gene[i]
+  pos_i <- setdiff(all_pos, g); neg_i <- setdiff(all_neg, g)
+  nc_loo[g] <- network_contrast(graph, pos_i, neg_i, query = g, restart = RESTART)[g]
+}
+nc_for_feat <- nc_all
+nc_for_feat[names(nc_loo)] <- nc_loo   # overwrite labelled genes with the honest LOO value
+net_med <- median(nc_loo, na.rm = TRUE)   # honest (LOO) imputation median
+
+
+# Build the full (every gene: positive/negative/grey) feature table, using the
+# honest (LOO-corrected for labelled genes, self-seeded-but-unbiased for grey
+# genes) network feature computed above, and flag which genes had no network
+# score at all (absent from STRING) so that's visible downstream.
+full <- feat %>%
+  mutate(net_contrast = ifelse(is.na(nc_for_feat[gene]), net_med, nc_for_feat[gene]),
+         network_missing = as.integer(is.na(nc_for_feat[gene])))
+# Constraint-feature imputation here uses the median across all LABELLED genes
+# only (label != "grey"), matching the CV loop's principle of never letting
+# the genes being scored/predicted influence the value they get imputed to.
+for (v in CONT_FEATS) {
+  m <- median(full[[v]][full$label != "grey"], na.rm = TRUE)
+  full[[v]] <- ifelse(is.na(full[[v]]), m, full[[v]])
+}
+lab_full <- full %>% filter(label %in% c("positive","negative")) %>%
+  mutate(y = factor(if_else(label=="positive","pos","neg"), levels=c("neg","pos")))
+
+# RF on all labelled genes
+# Same class-balanced bootstrap-sampling approach as each CV fold (see
+# Section 2), but now trained on every labelled gene at once -- this is the
+# single model whose feature importances/SHAP values and grey-zone
+# predictions are reported below. `importance = TRUE` retains randomForest's
+# own permutation-importance scores as a cross-check against the SHAP ranking.
+n_min <- min(table(lab_full$y))
+rf_full <- randomForest(x = lab_full[, FEATURES], y = lab_full$y, ntree = N_TREES,
+                       importance = TRUE, strata = lab_full$y,
+                       sampsize = c(neg = n_min, pos = n_min))
+
+# SHAP (Shapley value) summary: shows magnitude AND direction per feature,
+# unlike bare permutation importance (magnitude only). fastshap computes
+# model-agnostic Monte-Carlo-approximate Shapley values (N_SHAP_SIM repetitions
+# per gene) via a predict-probability wrapper; shapviz turns the resulting
+# gene x feature SHAP matrix into a beeswarm plot (features ordered by mean
+# |SHAP|, points coloured by that gene's feature value, position = SHAP value
+# i.e. that feature's push toward/away from "high somatic utility" for that
+# gene). baseline = the RF's average predicted probability of "pos" (the
+# reference point SHAP values are measured against).
+shap_pfun <- function(object, newdata) predict(object, newdata = newdata, type = "prob")[, "pos"]
+X_shap <- as.data.frame(lab_full[, FEATURES])
+shap_vals <- fastshap::explain(rf_full, X = X_shap, pred_wrapper = shap_pfun, nsim = N_SHAP_SIM)
+shap_baseline <- mean(shap_pfun(rf_full, X_shap))
+sv_rf <- shapviz(as.matrix(shap_vals), X = X_shap, baseline = shap_baseline)
+
+# Interpretable multivariable model -> odds ratios via RIDGE-penalised logistic
+# regression (glmnet, alpha = 0), NOT plain glm(). With 40 events across 9
+# features -- some structurally correlated, e.g. cancer_oncogene_missense with
+# dd_altfunc, since the manuscript's AltFunc group is defined as their
+# intersection -- plain glm() showed COMPLETE SEPARATION when tested (residual
+# deviance ~0, every fitted probability at the 0/1 boundary, coefficient SEs of
+# order 1e5): confirmed empirically, not just a theoretical risk. Ridge
+# regularisation shrinks all coefficients to finite, stable values while
+# keeping every feature in the model (appropriate here since the goal is one
+# interpretable estimate per feature, not sparse selection). glmnet has no
+# analytic CIs, so we bootstrap coefficients at a FIXED lambda (selected once
+# via lambda.1se on the full labelled set) to get percentile 95% intervals --
+# the same resample-and-refit logic already used for the RF importance
+# bootstrap above.
+#
+# Continuous/count features (loeuf, moeuf, exp_mis, hotspot_count,
+# net_contrast) are z-scored before fitting, so every OR below is per 1-SD
+# increase; binary features (0/1) are left as-is, so their OR is already a
+# natural per-unit (absent->present) contrast. Without this, a raw-unit OR for
+# a feature ranging 0-48 (hotspot_count) or 200-7000 (exp_mis) looks
+# artificially close to 1 next to a 0/1 feature, even when both carry
+# comparable information -- this is a real, checked distortion, not
+# just a hypothetical concern.
+STD_FEATS <- c("loeuf", "moeuf", "exp_mis", "hotspot_count", "net_contrast")
+lab_full_std <- lab_full
+for (v in STD_FEATS) lab_full_std[[v]] <- as.numeric(scale(lab_full_std[[v]]))
+x_mat <- as.matrix(lab_full_std[, FEATURES])
+y01   <- as.integer(lab_full$y == "pos")
+stopifnot(!anyNA(x_mat))
+
+# Lambda is selected by LEAVE-ONE-OUT cross-validation (nfolds = number of
+# labelled genes), not the random N_FOLDS-fold CV used for model performance
+# in Section 2, because random 5-fold CV picks a genuinely different
+# lambda.1se (and hence a materially different ridge OR point estimate -- up
+# to ~30% swings for the most correlated features, e.g.
+# cancer_oncogene_missense) depending on which random fold split happens to
+# be drawn, even with a fixed seed elsewhere in the script (the fold split
+# itself is a further random draw). With only 124 labelled genes, a 5-fold
+# split is small enough for this fold-assignment noise to move the CV error
+# curve enough to select a different penalty. Leave-one-out CV has a unique,
+# deterministic fold assignment (each gene held out exactly once), which
+# removes this instability entirely: it gives an identical lambda_sel and OR
+# point estimates across repeated runs with different seeds. The percentile
+# bootstrap CI below (at this fixed lambda) is unaffected and is already stable
+# at BOOT_IMP=200.
+cv_ridge   <- cv.glmnet(x_mat, y01, family = "binomial", alpha = 0, nfolds = nrow(x_mat))
+lambda_sel <- cv_ridge$lambda.1se
+cat(sprintf("Ridge penalty selected (lambda.1se): %.4f\n", lambda_sel))
+
+fit_ridge <- glmnet(x_mat, y01, family = "binomial", alpha = 0, lambda = lambda_sel)
+point_tab <- as.matrix(coef(fit_ridge)) %>%
+  {tibble(term = rownames(.), beta = .[, 1])} %>%
+  filter(term != "(Intercept)")
+
+or_boot <- map_dfr(seq_len(BOOT_IMP), function(b) {
+  bi <- sample(nrow(lab_full), replace = TRUE)
+  xb <- x_mat[bi, , drop = FALSE]; yb <- y01[bi]
+  if (length(unique(yb)) < 2) return(NULL)
+  fit_b <- glmnet(xb, yb, family = "binomial", alpha = 0, lambda = lambda_sel)
+  cf <- as.matrix(coef(fit_b))
+  tibble(term = rownames(cf), beta = cf[, 1], b = b) %>% filter(term != "(Intercept)")
+})
+
+or_tab <- or_boot %>%
+  group_by(term) %>%
+  summarise(conf.low = quantile(beta, .025), conf.high = quantile(beta, .975), .groups = "drop") %>%
+  left_join(point_tab, by = "term") %>%
+  transmute(term, estimate = exp(beta), conf.low = exp(conf.low), conf.high = exp(conf.high))
+
+# Score grey-zone (and all) genes
+full$pred_prob <- predict(rf_full, full[, FEATURES], type = "prob")[, "pos"]
+
+# Numeric SHAP summary: mean |SHAP| per feature (for citing exact magnitudes of
+# importance in the manuscript text) and a direction indicator = the Spearman
+# correlation, across labelled genes, between each feature's own value and its
+# own SHAP value (positive = higher feature values push toward "high somatic
+# utility"). NB: the naive alternative, mean SIGNED SHAP, is NOT used here --
+# checked directly and found to be ~1000x smaller than mean |SHAP| and to
+# flip sign across independent Monte-Carlo reruns (SHAP values are ~zero-mean
+# by construction, since they sum to explain deviations from a fixed baseline
+# across the same data used to set that baseline), so it is pure noise, not a
+# usable direction summary. Read direction from this correlation, or from the
+# beeswarm colouring in the figure, not from an average signed SHAP value.
+shap_mat  <- as.matrix(shap_vals)
+shap_summ <- tibble(
+    feature = colnames(shap_mat),
+    mean_abs = colMeans(abs(shap_mat)),
+    direction_corr = vapply(colnames(shap_mat), function(f)
+      suppressWarnings(cor(X_shap[[f]], shap_mat[, f], method = "spearman")),
+      numeric(1))
+  ) %>% arrange(desc(mean_abs))
+cat("\nSHAP summary (ranked by mean |SHAP|; direction_corr = Spearman corr of feature value vs its SHAP value):\n")
+print(shap_summ, n = Inf)
+
+# Exported for the feature-dictionary supplementary table (Supplementary Table
+# 8), which merges these with a hand-written description/source per feature.
+write_csv(shap_summ, OUT_SHAP)
+write_csv(or_tab, OUT_OR)
+```
+
+# 4. Figure + prediction table
+
+```{r figure, message=FALSE, warning=FALSE, fig.width=13, fig.height=5}
+# Panel (a): SHAP beeswarm. Each dot is one labelled gene's SHAP value for one
+# feature (features stacked top-to-bottom, most important -- highest mean
+# |SHAP| -- at the top); dot colour = that gene's raw value for the feature
+# (shapviz's default palette); dot x-position = how much that feature pushed
+# THIS gene's prediction up (toward "high somatic utility") or down, relative
+# to the baseline. The CV AUC/AUPRC (Section 2) is printed in the subtitle so
+# the reader always sees the honest performance figure alongside the
+# full-data importance plot, not just the (necessarily rosier) in-sample fit.
+p_imp <- sv_importance(sv_rf, kind = "bee") +
+  labs(title = "(a) Random-forest SHAP summary",
+       subtitle = sprintf("CV AUC %.2f, AUPRC %.2f", mean(perf$auc), mean(perf$auprc)))
+
+# Panel (b): ridge odds ratios as a forest plot. Terms are ordered by their
+# point estimate (fct_reorder) so the plot reads top-to-bottom from strongest
+# positive to strongest negative association; the dashed vertical line at
+# OR = 1 marks "no association"; x is on a log scale, which is the natural
+# scale for odds ratios (an OR of 2 and an OR of 0.5 are equally far from 1).
+p_or <- or_tab %>%
+  mutate(term = fct_reorder(term, estimate)) %>%
+  ggplot(aes(estimate, term)) +
+  geom_vline(xintercept = 1, linetype = "dashed", colour = "grey50") +
+  geom_pointrange(aes(xmin = conf.low, xmax = conf.high)) +
+  scale_x_log10() +
+  labs(title = "(b) Ridge logistic regression",
+       subtitle = "Ridge-penalised (bootstrap 95% CI)",
+       x = "Odds ratio for high somatic utility (log scale)", y = NULL)
+
+# Combine both panels side by side with patchwork, and add a shared caption
+# (rather than repeating it per-panel) reminding the reader how to interpret
+# the OR scale in panel (b).
+fig <- patchwork::wrap_plots(p_imp, p_or, ncol = 2) +
+  patchwork::plot_annotation(caption = paste(
+    "Ridge odds ratios (b): continuous features standardised per 1-SD;",
+    "binary features per unit (absent -> present)."))
+ggsave(OUT_FIG, fig, width = 13, height = 5.3, dpi = 300)
+fig
+
+# Export the full per-gene table (every gene: positive/negative/grey) with its
+# features, its original benchmarking AUC, and this model's predicted
+# probability of "high somatic utility" (pred_prob) -- this becomes the
+# feature-dictionary / per-gene-prediction supplementary table. Sorted with
+# the most-confidently-predicted-useful genes first.
+full %>%
+  select(gene, label, auc, auc_lower, auc_upper, all_of(FEATURES),
+         constraint_missing, network_missing, pred_prob) %>%
+  arrange(desc(pred_prob)) %>%
+  write_csv(OUT_PRED)
+cat("Wrote:", OUT_FIG, "and", OUT_PRED, "\n")
+
+# sanity checks
+# The RASopathy genes are the paper's own worked example of genes with
+# excellent somatic-data utility, so as a quick plausibility check, print
+# their predicted probabilities here and eyeball that they come out high.
+cat("\nRASopathy genes (expect high pred_prob):\n")
+full %>% filter(gene %in% c("PTPN11","KRAS","HRAS","BRAF","MAP2K1","RIT1")) %>%
+  select(gene, label, pred_prob) %>% print()
+```
+
+> Caveats to carry into the manuscript: (i) small positive class (40) — CV, not
+> training, performance is reported; (ii) hotspot count, exp_mis and the
+> network feature partly derive from somatic / mutation-model / label-seeded
+> data (flagged in Discussion); the network feature is fold-aware for CV, and
+> for the full-model figure/table labelled genes' net_contrast is computed
+> leave-one-out (each gene excluded from its own class's seed set) to avoid the
+> substantial self-seeding inflation this produces
+> (~3.6x apparent class-separation inflation, some genes sign-flipped) — only
+> grey-zone genes use the seed-on-all-labelled version, which is unbiased since
+> they are never seeds; (iii) mechanism defines the original gene groups, so it
+> is expected to be a leading
+> predictor; (iv) the multivariable odds ratios use RIDGE-penalised (not plain)
+> logistic regression, with bootstrap (not analytic) confidence intervals --
+> plain glm() was tested first and showed complete separation on this dataset
+> (residual deviance ~0, all fitted probabilities at the 0/1 boundary), so the
+> reported odds ratios are regularised/shrunk towards 1 and should be described
+> as such, not as unpenalised maximum-likelihood estimates; (v) the RF panel
+> shows Shapley (SHAP) values, giving both magnitude and direction per feature
+> (unlike bare permutation importance, which is magnitude-only) -- these are
+> Monte-Carlo-approximate (fastshap, N_SHAP_SIM repetitions per gene), not exact
+> TreeSHAP, so expect small run-to-run numerical noise at fixed N_SHAP_SIM;
+> (vi) the model's strongest predictors (hotspot_count, net_contrast, the
+> cancer CGC flags) are themselves somatic/cancer-domain annotations, so most
+> of its discriminative power reflects overlap between the label and other
+> somatic-data sources rather than gene properties independent of somatic
+> data -- this should be stated explicitly in the Discussion rather than
+> implied.

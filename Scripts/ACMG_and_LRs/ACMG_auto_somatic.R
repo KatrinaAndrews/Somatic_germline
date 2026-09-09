@@ -57,6 +57,14 @@ v <- read_tsv(variants_path, show_col_types = FALSE) %>%
   ) %>%
   left_join(hotspots, by = c("gene", "codon")) %>%
   mutate(hotspot = coalesce(hotspot, FALSE),
+         # Deliberate simplification: a missing gnomad_min_cov value is treated
+         # as adequate coverage (cov_ok = TRUE), the same as an actual value
+         # >=10. We do not have a reliable way to distinguish "coverage
+         # annotation missing" from "coverage genuinely adequate" at this
+         # variant list stage, and treating missing as inadequate would
+         # silently suppress BA1/BS1 for an unknown (but likely small) number
+         # of sites rather than just leaving the resulting classification
+         # unverified for those sites specifically.
          cov_ok  = is.na(gnomad_min_cov) | gnomad_min_cov >= 10) %>%
   mutate(PP2_supporting = grepl("missense", consequence) & gene %in% pp2_genes)
 

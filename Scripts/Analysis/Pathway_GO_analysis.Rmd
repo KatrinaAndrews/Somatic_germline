@@ -143,7 +143,20 @@ n_vars <- read_csv(
   show_col_types = FALSE
 )
 
-# Restrict to COSMIC codon count predictor in the clinvar_count_weighted dataset
+# Unique-variant counts, used to apply the >=10 unique pathogenic / >=10 unique
+# benign benchmarking-eligibility threshold. This is the same threshold used for
+# the per-gene benchmarking elsewhere and for the RASopathy heatmap (Figure 4).
+# Some genes have an AUC computed on the count-weighted ("long") data but fewer
+# than 10 UNIQUE pathogenic or benign variants (e.g. SHOC2: 5 unique pathogenic);
+# these are excluded here so that Table 3 uses a consistent eligibility rule.
+n_vars_unique <- n_vars %>%
+  filter(data_set == "clinvar_mutation_data_unique") %>%
+  dplyr::select(gene,
+                n_path_unique   = n_path_variants,
+                n_benign_unique = n_benign_variants)
+
+# Restrict to COSMIC codon count predictor in the clinvar_count_weighted dataset,
+# then to the benchmarking-eligible set (>=10 unique pathogenic and >=10 unique benign)
 clinvar_long_COSMIC <- gene_AUCs_individual_features %>%
   filter(Predictor == "n_COSMIC_codon_count",
          dataset  == "clinvar_count_weighted") %>%
@@ -151,9 +164,13 @@ clinvar_long_COSMIC <- gene_AUCs_individual_features %>%
   left_join(
     n_vars %>% filter(data_set == "clinvar_mutation_data_long"),
     by = "gene"
-  )
+  ) %>%
+  left_join(n_vars_unique, by = "gene") %>%
+  filter(!is.na(n_path_unique), !is.na(n_benign_unique),
+         n_path_unique >= 10, n_benign_unique >= 10)
 
-cat("Genes with clinvar_long COSMIC codon count AUC:", nrow(clinvar_long_COSMIC), "\n")
+cat("Genes with clinvar_long COSMIC codon count AUC (benchmarking-eligible, >=10 unique path & benign):",
+    nrow(clinvar_long_COSMIC), "\n")
 ```
 
 # Annotate genes with gene group flags
