@@ -643,12 +643,6 @@ generate_ptpn11_mave_panel <- function(gene_symbol, clinvar, COSMIC, DNMs, sperm
 
 # Figures
 
-## Graphic abstract
-
-```{r}
-knitr::include_graphics("../../Data/Figures/Final/FigureLabs_graphic_abstract.jpg")
-```
-
 ## Figure 1: Mutation frequency and distribution
 
 ```{r, fig.width=16, fig.height=8, warning=FALSE, message=FALSE}
